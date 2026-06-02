@@ -1,0 +1,2 @@
+### EXTERNAL TOOL REQUIRED HERE: MUSCLE ###
+Place alignment at msa/muscle_alignment.fasta

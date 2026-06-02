@@ -1,0 +1,2 @@
+### EXTERNAL TOOL REQUIRED HERE: ConSurf ###
+Place scores at conservation/consurf_scores.csv

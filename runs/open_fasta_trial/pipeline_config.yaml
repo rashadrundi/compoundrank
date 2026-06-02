@@ -1,0 +1,47 @@
+project_name: "example_stage1_run"
+run_dir: "runs/open_fasta_trial"
+run_enabled_external_tools: false
+
+input:
+  protein_fasta: "runs/open_fasta_trial/input/protein.fasta"
+
+paths:
+  interpro_tsv: "runs/open_fasta_trial/annotation/interpro/nextflow_out/protein.fasta.tsv"
+  cdd_csv: "runs/open_fasta_trial/annotation/cdd/cdd_results.csv"
+  pfam_tbl: "runs/open_fasta_trial/annotation/pfam/pfam.tbl"
+  vogdb_hits: "runs/open_fasta_trial/homologs/vogdb_hits.csv"
+  homolog_fasta: "runs/open_fasta_trial/homologs/homologs.fasta"
+  mafft_alignment: "runs/open_fasta_trial/msa/mafft_alignment.fasta"
+  muscle_alignment: "runs/open_fasta_trial/msa/muscle_alignment.fasta"
+  receptor_pdb: "runs/open_fasta_trial/structure/receptor.pdb"
+  pae_json: "runs/open_fasta_trial/structure/pae.json"
+  molprobity_csv: "runs/open_fasta_trial/structure/molprobity.csv"
+  qmean_csv: "runs/open_fasta_trial/structure/qmean.csv"
+  consurf_scores: "runs/open_fasta_trial/conservation/consurf_scores.csv"
+  ring_edges: "runs/open_fasta_trial/psn/ring_edges.csv"
+  fpocket_info_dir: "runs/open_fasta_trial/pockets/fpocket_out"
+  p2rank_csv: "runs/open_fasta_trial/pockets/p2rank_predictions.csv"
+  dogsite_csv: "runs/open_fasta_trial/pockets/dogsite_pockets.csv"
+  receptor_prep_status: "runs/open_fasta_trial/receptor/receptor_prep_status.yaml"
+  ligand_candidates: "runs/open_fasta_trial/ligands/raw/ligand_candidates.csv"
+  gnina_scores: "runs/open_fasta_trial/docking/gnina_scores.csv"
+
+external_tools:
+  auto_run: true
+
+  cdd:
+    enabled: true
+    force: true
+
+  interpro:
+    wsl_distro: "Ubuntu"
+    enabled: true
+    force: true
+    mode: wsl
+    nxf_ver: "25.04.6"
+    revision: "6.0.0"
+    datadir: "interpro_data"
+    workdir: "interpro_work"
+    applications: "pfam,ncbifam,superfamily"
+    goterms: false
+    pathways: false

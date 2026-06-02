@@ -1,0 +1,2 @@
+### EXTERNAL TOOL REQUIRED HERE: CDD / CD-Search ###
+Place CSV at annotation/cdd/cdd_results.csv

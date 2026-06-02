@@ -1,0 +1,2 @@
+### EXTERNAL TOOL REQUIRED HERE: Meeko receptor prep ###
+Record receptor/box status in receptor/receptor_prep_status.yaml

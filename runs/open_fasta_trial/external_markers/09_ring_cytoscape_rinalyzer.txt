@@ -1,0 +1,2 @@
+### EXTERNAL TOOL REQUIRED HERE: RING / Cytoscape / RINalyzer ###
+Place edge table at psn/ring_edges.csv

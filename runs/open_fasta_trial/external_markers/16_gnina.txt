@@ -1,0 +1,2 @@
+### EXTERNAL TOOL REQUIRED HERE: GNINA ###
+Place scores at docking/gnina_scores.csv

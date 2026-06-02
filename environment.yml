@@ -1,0 +1,16 @@
+name: antiviral-stage1
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pandas
+  - pyyaml
+  - biopython
+  - numpy
+  - networkx
+  - rdkit
+  - openbabel
+  - pip
+  - pip:
+      - meeko

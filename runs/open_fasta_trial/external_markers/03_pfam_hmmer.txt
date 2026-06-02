@@ -1,0 +1,2 @@
+### EXTERNAL TOOL REQUIRED HERE: Pfam / HMMER ###
+Place hmmscan --tblout at annotation/pfam/pfam.tbl

@@ -1,0 +1,2 @@
+### EXTERNAL TOOL REQUIRED HERE: ChimeraX ###
+Record inspection status in receptor/receptor_prep_status.yaml

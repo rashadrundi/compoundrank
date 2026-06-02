@@ -1,0 +1,2 @@
+### EXTERNAL TOOL REQUIRED HERE: PDBFixer ###
+Record repair status in receptor/receptor_prep_status.yaml

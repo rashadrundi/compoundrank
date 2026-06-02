@@ -1,0 +1,2 @@
+### EXTERNAL TOOL REQUIRED HERE: ChEMBL / BindingDB / PubChem Structure Search / ZINC-22 ###
+Place ligand candidates at ligands/raw/ligand_candidates.csv
