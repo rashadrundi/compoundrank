@@ -31,13 +31,13 @@ external_tools:
 
   cdd:
     enabled: true
-    force: true
+    force: false
 
   interpro:
     wsl_distro: "Ubuntu"
     enabled: true
     force: true
-    mode: wsl
+    mode: local
     nxf_ver: "25.04.6"
     revision: "6.0.0"
     datadir: "interpro_data"

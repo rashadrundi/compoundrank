@@ -5,3 +5,4 @@ numpy
 networkx
 rdkit
 meeko
+tabulate

@@ -132,6 +132,61 @@ NXF_VER="{nxf_ver}" nextflow run ebi-pf-team/interproscan6 \\
     print(f"[AUTO:InterPro] Copied InterPro TSV to: {out_tsv}")
 
 
+def _run_interpro_local(project_root, run_dir, settings):
+    out_tsv = Path(run_dir) / "annotation" / "interpro" / "nextflow_out" / "protein.fasta.tsv"
+    out_dir = Path(run_dir) / "annotation" / "interpro" / "nextflow_out"
+    force = bool(settings.get("force", False))
+
+    if _nonempty(out_tsv) and not force:
+        print(f"[AUTO:InterPro] Existing InterPro output found. Skipping: {out_tsv}")
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    nxf_ver = str(settings.get("nxf_ver", "25.04.6"))
+    revision = str(settings.get("revision", "6.0.0"))
+    datadir = str(settings.get("datadir", "interpro_data"))
+    workdir = str(settings.get("workdir", "interpro_work"))
+    applications = str(settings.get("applications", "pfam,ncbifam,superfamily"))
+
+    extra_flags = []
+    if bool(settings.get("goterms", False)):
+        extra_flags.append("--goterms")
+    if bool(settings.get("pathways", False)):
+        extra_flags.append("--pathways")
+
+    extra = " ".join(extra_flags)
+
+    bash_command = f'''
+    set -e
+    cd "{project_root}"
+
+    mkdir -p "{out_dir}"
+    mkdir -p "{datadir}"
+    mkdir -p "{workdir}"
+
+    NXF_VER="{nxf_ver}" nextflow run ebi-pf-team/interproscan6 \\
+    -r "{revision}" \\
+    -profile docker \\
+    --input "{Path(run_dir) / "input" / "protein.fasta"}" \\
+    --datadir "{datadir}" \\
+    --interpro latest \\
+    --outdir "{out_dir}" \\
+    --applications "{applications}" \\
+    {extra} \\
+    -w "{workdir}"
+    '''
+
+    _run(["bash", "-lc", bash_command], cwd=project_root)
+
+    if not _nonempty(out_tsv):
+        print("[AUTO:InterPro] Files found in InterPro output directory:")
+        for p in out_dir.rglob("*"):
+            print(f"  {p}")
+        raise RuntimeError(f"Expected InterPro TSV not found: {out_tsv}")
+
+    print(f"[AUTO:InterPro] InterPro TSV ready: {out_tsv}")
+
 def maybe_run_external_tools(config):
     external = config.get("external_tools", {})
 
@@ -160,13 +215,19 @@ def maybe_run_external_tools(config):
 
     interpro_settings = external.get("interpro", {})
     if interpro_settings.get("enabled", False):
-        mode = interpro_settings.get("mode", "wsl")
+        mode = interpro_settings.get("mode", "local")
 
-        if mode != "wsl":
-            raise ValueError("For now, this auto-runner only supports InterPro mode: wsl")
-
-        _run_interpro_wsl(
-            project_root=project_root,
-            run_dir=run_dir,
-            settings=interpro_settings,
-        )
+        if mode == "wsl":
+            _run_interpro_wsl(
+                project_root=project_root,
+                run_dir=run_dir,
+                settings=interpro_settings,
+            )
+        elif mode == "local":
+            _run_interpro_local(
+                project_root=project_root,
+                run_dir=run_dir,
+                settings=interpro_settings,
+            )
+        else:
+            raise ValueError(f"Unsupported InterPro mode: {mode}")
