@@ -187,6 +187,86 @@ def _run_interpro_local(project_root, run_dir, settings):
 
     print(f"[AUTO:InterPro] InterPro TSV ready: {out_tsv}")
 
+def _run_vogdb_local(project_root, run_dir, settings):
+    run_dir = Path(run_dir)
+    project_root = Path(project_root)
+
+    force = bool(settings.get("force", False))
+    cpu = str(settings.get("cpu", 2))
+    max_hits = str(settings.get("max_hits", 10))
+
+    hmm_db = Path(settings.get("hmm_db", "vogdb_data/vog224.hmm"))
+    if not hmm_db.is_absolute():
+        hmm_db = project_root / hmm_db
+
+    input_fasta = run_dir / "input" / "protein.fasta"
+
+    raw_dir = run_dir / "homologs" / "vogdb_raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    tblout = raw_dir / "vogdb.tblout"
+    domtblout = raw_dir / "vogdb.domtblout"
+    hmmscan_txt = raw_dir / "vogdb.hmmscan.txt"
+    out_csv = run_dir / "homologs" / "vogdb_hits.csv"
+
+    if _nonempty(out_csv) and not force:
+        print(f"[AUTO:VOGDB] Existing VOGDB output found. Skipping: {out_csv}")
+        return
+
+    if not input_fasta.exists():
+        raise FileNotFoundError(f"[AUTO:VOGDB] Missing input FASTA: {input_fasta}")
+
+    if not hmm_db.exists():
+        raise FileNotFoundError(f"[AUTO:VOGDB] Missing VOGDB HMM database: {hmm_db}")
+
+    pressed_files = [
+        Path(str(hmm_db) + ".h3f"),
+        Path(str(hmm_db) + ".h3i"),
+        Path(str(hmm_db) + ".h3m"),
+        Path(str(hmm_db) + ".h3p"),
+    ]
+
+    if not all(p.exists() for p in pressed_files):
+        print(f"[AUTO:VOGDB] Pressed HMMER index files missing. Running hmmpress on: {hmm_db}")
+        _run(["hmmpress", str(hmm_db)], cwd=project_root)
+
+    print("[AUTO:VOGDB] Running hmmscan against VOGDB.")
+    print(f"[AUTO:VOGDB] HMM DB: {hmm_db}")
+    print(f"[AUTO:VOGDB] FASTA: {input_fasta}")
+
+    cmd = [
+        "hmmscan",
+        "--tblout", str(tblout),
+        "--domtblout", str(domtblout),
+        "--cpu", cpu,
+        str(hmm_db),
+        str(input_fasta),
+    ]
+
+    with open(hmmscan_txt, "w", encoding="utf-8") as stdout_file:
+        result = subprocess.run(cmd, cwd=project_root, stdout=stdout_file)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"[AUTO:VOGDB] hmmscan failed with exit code {result.returncode}")
+
+    parser_script = project_root / "external_scripts" / "insertion_scripts" / "parse_vogdb_hmmscan.py"
+
+    if not parser_script.exists():
+        raise FileNotFoundError(f"[AUTO:VOGDB] Missing parser script: {parser_script}")
+
+    _run([
+        "python",
+        str(parser_script),
+        "--tblout", str(tblout),
+        "--out", str(out_csv),
+        "--max-hits", max_hits,
+    ], cwd=project_root)
+
+    if not _nonempty(out_csv):
+        raise RuntimeError(f"[AUTO:VOGDB] Expected VOGDB CSV not created: {out_csv}")
+
+    print(f"[AUTO:VOGDB] VOGDB hits ready: {out_csv}")
+
 def maybe_run_external_tools(config):
     external = config.get("external_tools", {})
 
@@ -231,3 +311,17 @@ def maybe_run_external_tools(config):
             )
         else:
             raise ValueError(f"Unsupported InterPro mode: {mode}")
+
+    vogdb_settings = external.get("vogdb", {})
+
+    if bool(vogdb_settings.get("enabled", False)):
+        mode = vogdb_settings.get("mode", "local")
+
+        if mode == "local":
+            _run_vogdb_local(
+                project_root=project_root,
+                run_dir=run_dir,
+                settings=vogdb_settings,
+            )
+        else:
+            raise ValueError(f"Unsupported VOGDB mode: {mode}")

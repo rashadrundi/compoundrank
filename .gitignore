@@ -19,6 +19,7 @@ vogdb_data/
 *.hmm.h3p
 *.tar.gz
 *.zip
+*.tar
 
 # InterPro test/demo output
 test.faa.*
