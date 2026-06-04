@@ -33,7 +33,7 @@ external_tools:
     enabled: true
     force: true
     mode: local
-    hmm_db: "~/opt/compoundrank/data/vogdb_data/vog224.hmm"
+    hmm_db: "/data/vogdb_data/vog224.hmm"
     cpu: 2
     max_hits: 10
 
@@ -48,7 +48,7 @@ external_tools:
     mode: local
     nxf_ver: "25.04.6"
     revision: "6.0.0"
-    datadir: "~/opt/compoundrank/data/interpro_data/"
+    datadir: "/data/interpro_data"
     workdir: "interpro_work"
     applications: "pfam,ncbifam,superfamily"
     goterms: false
