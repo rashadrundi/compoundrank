@@ -133,9 +133,12 @@ NXF_VER="{nxf_ver}" nextflow run ebi-pf-team/interproscan6 \\
 
 
 def _run_interpro_local(project_root, run_dir, settings):
+    print("[DEBUG] InterPro settings =", settings)
+    
     out_tsv = Path(run_dir) / "annotation" / "interpro" / "nextflow_out" / "protein.fasta.tsv"
     out_dir = Path(run_dir) / "annotation" / "interpro" / "nextflow_out"
     force = bool(settings.get("force", False))
+
 
     if _nonempty(out_tsv) and not force:
         print(f"[AUTO:InterPro] Existing InterPro output found. Skipping: {out_tsv}")
