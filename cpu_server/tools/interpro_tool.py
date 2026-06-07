@@ -302,7 +302,7 @@ def run_interpro_tool(
     datadir=None,
     interpro_data_dir=None,
     workdir=None,
-    applications="pfam,ncbifam,superfamily",
+    applications="pfam,ncbifam",
     goterms=False,
     pathways=False,
     wsl_distro="Ubuntu",
