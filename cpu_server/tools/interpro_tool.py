@@ -109,7 +109,7 @@ def run_interpro_local(
     datadir=None,
     interpro_data_dir=None,
     workdir=None,
-    applications="pfam,ncbifam,superfamily",
+    applications="pfam,ncbifam",
     goterms=False,
     pathways=False,
 ):
