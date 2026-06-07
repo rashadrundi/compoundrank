@@ -44,4 +44,4 @@ RUN if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
 ENV PATH="/opt/conda/envs/compoundrank/bin:${PATH}"
 
-CMD ["micromamba", "run", "-n", "compoundrank", "python", "run_pipeline.py", "--config", "runs/open_fasta_trial/pipeline_config.yaml"]
+CMD ["micromamba", "run", "-n", "compoundrank", "python", "-m", "uvicorn", "cpu_server.app:app", "--host", "0.0.0.0", "--port", "8000"]
