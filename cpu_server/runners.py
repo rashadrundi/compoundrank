@@ -354,6 +354,7 @@ def run_interpro(job_dir: Path, fasta_path: Path) -> Dict[str, Any]:
         log_path=log_file,
         fasta_path=fasta_path,
         output_dir=output_dir,
+        interpro_data_dir=INTERPRO_DATA_ROOT,
     )
 
     output_file = find_existing_output(
@@ -422,6 +423,7 @@ def run_vogdb(job_dir: Path, fasta_path: Path) -> Dict[str, Any]:
         log_path=log_file,
         fasta_path=fasta_path,
         output_dir=output_dir,
+        vogdb_data_dir=VOGDB_DATA_ROOT,
     )
 
     output_file = find_existing_output(

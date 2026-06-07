@@ -228,13 +228,23 @@ def run_cdd_tool(
     max_attempts=30,
     sleep_seconds=70,
 ):
+    """
+    Runs NCBI Batch CD-Search.
+
+    Expected FastAPI job layout:
+    output_dir = /opt/compoundrank/jobs/<job_id>/annotation/cdd
+
+    Writes:
+    output_dir/cdd_results.csv
+    output_dir/cdd_submit_response.txt
+    output_dir/cdd_raw_hits.txt
+    """
+
     fasta_path = Path(fasta_path).resolve()
     output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    cdd_dir = output_dir / "cdd"
-    cdd_dir.mkdir(parents=True, exist_ok=True)
-
-    out_csv = cdd_dir / "cdd_results.csv"
+    out_csv = output_dir / "cdd_results.csv"
 
     if _nonempty(out_csv) and not force:
         print(f"[CDD] Existing output found. Skipping: {out_csv}")
@@ -247,7 +257,7 @@ def run_cdd_tool(
 
     initial_text = submit_cdd_job(fasta_text)
 
-    submit_response_path = cdd_dir / "cdd_submit_response.txt"
+    submit_response_path = output_dir / "cdd_submit_response.txt"
 
     with open(submit_response_path, "w", encoding="utf-8") as f:
         f.write(initial_text)
@@ -258,7 +268,7 @@ def run_cdd_tool(
         search_id = extract_search_id(initial_text)
 
         if not search_id:
-            debug_path = cdd_dir / "cdd_submit_debug.html"
+            debug_path = output_dir / "cdd_submit_debug.html"
 
             with open(debug_path, "w", encoding="utf-8") as f:
                 f.write(initial_text)
@@ -270,12 +280,12 @@ def run_cdd_tool(
 
         result_text = retrieve_hits(
             search_id=search_id,
-            cdd_dir=cdd_dir,
+            cdd_dir=output_dir,
             max_attempts=max_attempts,
             sleep_seconds=sleep_seconds,
         )
 
-    raw_hits_path = cdd_dir / "cdd_raw_hits.txt"
+    raw_hits_path = output_dir / "cdd_raw_hits.txt"
 
     with open(raw_hits_path, "w", encoding="utf-8") as f:
         f.write(result_text)
@@ -283,7 +293,7 @@ def run_cdd_tool(
     rows = parse_hits(result_text)
 
     if not rows:
-        debug_path = cdd_dir / "cdd_results_debug.txt"
+        debug_path = output_dir / "cdd_results_debug.txt"
 
         with open(debug_path, "w", encoding="utf-8") as f:
             f.write(result_text)

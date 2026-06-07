@@ -1,4 +1,5 @@
 import csv
+import os
 import subprocess
 from pathlib import Path
 
@@ -15,10 +16,41 @@ def _run(cmd, cwd=None):
     print("[VOGDB] Running:")
     print(" ".join(str(x) for x in cmd))
 
-    result = subprocess.run(cmd, cwd=cwd)
+    result = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if result.stdout:
+        print("[VOGDB] STDOUT:")
+        print(result.stdout)
+
+    if result.stderr:
+        print("[VOGDB] STDERR:")
+        print(result.stderr)
 
     if result.returncode != 0:
-        raise RuntimeError(f"[VOGDB] Command failed with exit code {result.returncode}")
+        raise RuntimeError(
+            "[VOGDB] Command failed\n"
+            f"Exit code: {result.returncode}\n\n"
+            f"Command:\n{' '.join(str(x) for x in cmd)}\n\n"
+            f"STDOUT:\n{result.stdout}\n\n"
+            f"STDERR:\n{result.stderr}\n"
+        )
+
+    return result
+
+
+def _default_vogdb_data_dir():
+    return Path(
+        os.getenv(
+            "VOGDB_DATA_ROOT",
+            "/opt/compoundrank/data/vogdb_data",
+        )
+    ).resolve()
 
 
 def parse_vogdb_tblout(tblout_path, out_csv, max_hits=10):
@@ -113,18 +145,30 @@ def run_vogdb_tool(
     fasta_path,
     output_dir,
     hmm_db=None,
+    vogdb_data_dir=None,
     force=False,
     cpu=2,
     max_hits=10,
 ):
+    """
+    Runs hmmscan against VOGDB.
+
+    Expected FastAPI job layout:
+    output_dir = /opt/compoundrank/jobs/<job_id>/homologs
+
+    Writes:
+    output_dir/vogdb_hits.csv
+    output_dir/vogdb_raw/
+    """
+
     fasta_path = Path(fasta_path).resolve()
     output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    vogdb_dir = output_dir / "vogdb"
-    raw_dir = vogdb_dir / "vogdb_raw"
+    raw_dir = output_dir / "vogdb_raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    out_csv = vogdb_dir / "vogdb_hits.csv"
+    out_csv = output_dir / "vogdb_hits.csv"
 
     if _nonempty(out_csv) and not force:
         print(f"[VOGDB] Existing output found. Skipping: {out_csv}")
@@ -133,8 +177,13 @@ def run_vogdb_tool(
     if not fasta_path.exists():
         raise FileNotFoundError(f"[VOGDB] Missing FASTA file: {fasta_path}")
 
+    if vogdb_data_dir is None:
+        vogdb_data_dir = _default_vogdb_data_dir()
+    else:
+        vogdb_data_dir = Path(vogdb_data_dir).resolve()
+
     if hmm_db is None:
-        hmm_db = MODULE_DIR / "vogdb_data" / "vog224.hmm"
+        hmm_db = vogdb_data_dir / "vog224.hmm"
     else:
         hmm_db = Path(hmm_db).resolve()
 
@@ -143,7 +192,7 @@ def run_vogdb_tool(
             "[VOGDB] Missing VOGDB HMM database:\n"
             + str(hmm_db)
             + "\n\nExpected default location:\n"
-            + str(MODULE_DIR / "vogdb_data" / "vog224.hmm")
+            + str(vogdb_data_dir / "vog224.hmm")
         )
 
     tblout = raw_dir / "vogdb.tblout"
@@ -159,26 +208,46 @@ def run_vogdb_tool(
 
     if not all(p.exists() for p in pressed_files):
         print(f"[VOGDB] HMMER index files missing. Running hmmpress on: {hmm_db}")
-        _run(["hmmpress", str(hmm_db)], cwd=MODULE_DIR)
+        _run(["hmmpress", str(hmm_db)], cwd=vogdb_data_dir)
 
     print("[VOGDB] Running hmmscan.")
     print(f"[VOGDB] HMM DB: {hmm_db}")
     print(f"[VOGDB] FASTA: {fasta_path}")
+    print(f"[VOGDB] Output CSV: {out_csv}")
 
     cmd = [
         "hmmscan",
-        "--tblout", str(tblout),
-        "--domtblout", str(domtblout),
-        "--cpu", str(cpu),
+        "--tblout",
+        str(tblout),
+        "--domtblout",
+        str(domtblout),
+        "--cpu",
+        str(cpu),
         str(hmm_db),
         str(fasta_path),
     ]
 
     with open(hmmscan_txt, "w", encoding="utf-8") as stdout_file:
-        result = subprocess.run(cmd, cwd=MODULE_DIR, stdout=stdout_file)
+        result = subprocess.run(
+            cmd,
+            cwd=str(output_dir),
+            stdout=stdout_file,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+    if result.stderr:
+        print("[VOGDB] hmmscan STDERR:")
+        print(result.stderr)
 
     if result.returncode != 0:
-        raise RuntimeError(f"[VOGDB] hmmscan failed with exit code {result.returncode}")
+        raise RuntimeError(
+            "[VOGDB] hmmscan failed\n"
+            f"Exit code: {result.returncode}\n\n"
+            f"Command:\n{' '.join(cmd)}\n\n"
+            f"STDERR:\n{result.stderr}\n"
+        )
 
     if not _nonempty(tblout):
         raise RuntimeError(f"[VOGDB] Expected tblout missing or empty: {tblout}")

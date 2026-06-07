@@ -1,4 +1,5 @@
 import gzip
+import os
 import shlex
 import shutil
 import subprocess
@@ -17,10 +18,32 @@ def _run(cmd, cwd=None):
     print("[InterPro] Running:")
     print(" ".join(str(x) for x in cmd))
 
-    result = subprocess.run(cmd, cwd=cwd)
+    result = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if result.stdout:
+        print("[InterPro] STDOUT:")
+        print(result.stdout)
+
+    if result.stderr:
+        print("[InterPro] STDERR:")
+        print(result.stderr)
 
     if result.returncode != 0:
-        raise RuntimeError(f"[InterPro] Command failed with exit code {result.returncode}")
+        raise RuntimeError(
+            "[InterPro] Command failed\n"
+            f"Exit code: {result.returncode}\n\n"
+            f"Command:\n{' '.join(str(x) for x in cmd)}\n\n"
+            f"STDOUT:\n{result.stdout}\n\n"
+            f"STDERR:\n{result.stderr}\n"
+        )
+
+    return result
 
 
 def _win_to_wsl(path):
@@ -33,6 +56,15 @@ def _win_to_wsl(path):
         return f"/mnt/{drive}{rest}"
 
     return s.replace("\\", "/")
+
+
+def _default_interpro_data_dir():
+    return Path(
+        os.getenv(
+            "INTERPRO_DATA_ROOT",
+            "/opt/compoundrank/data/interpro_data",
+        )
+    ).resolve()
 
 
 def _copy_first_tsv(nextflow_out, final_tsv):
@@ -75,17 +107,30 @@ def run_interpro_local(
     nxf_ver="25.04.6",
     revision="6.0.0",
     datadir=None,
+    interpro_data_dir=None,
     workdir=None,
     applications="pfam,ncbifam,superfamily",
     goterms=False,
     pathways=False,
 ):
+    """
+    Runs InterProScan 6 through Nextflow/Docker.
+
+    Expected FastAPI job layout:
+    output_dir = /opt/compoundrank/jobs/<job_id>/annotation/interpro
+
+    Writes:
+    output_dir/interpro.tsv
+    output_dir/nextflow_out/
+    output_dir/interpro_work/
+    """
+
     fasta_path = Path(fasta_path).resolve()
     output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    interpro_dir = output_dir / "interpro"
-    nextflow_out = interpro_dir / "nextflow_out"
-    final_tsv = interpro_dir / "interpro.tsv"
+    nextflow_out = output_dir / "nextflow_out"
+    final_tsv = output_dir / "interpro.tsv"
 
     if _nonempty(final_tsv) and not force:
         print(f"[InterPro] Existing output found. Skipping: {final_tsv}")
@@ -94,13 +139,16 @@ def run_interpro_local(
     if not fasta_path.exists():
         raise FileNotFoundError(f"[InterPro] Missing FASTA file: {fasta_path}")
 
+    if interpro_data_dir is not None and datadir is None:
+        datadir = interpro_data_dir
+
     if datadir is None:
-        datadir = MODULE_DIR / "interpro_data"
+        datadir = _default_interpro_data_dir()
     else:
         datadir = Path(datadir).resolve()
 
     if workdir is None:
-        workdir = interpro_dir / "interpro_work"
+        workdir = output_dir / "interpro_work"
     else:
         workdir = Path(workdir).resolve()
 
@@ -138,6 +186,11 @@ NXF_VER={shlex.quote(str(nxf_ver))} nextflow run ebi-pf-team/interproscan6 \\
 """
 
     print("[InterPro] Running local Nextflow InterProScan.")
+    print(f"[InterPro] FASTA: {fasta_path}")
+    print(f"[InterPro] Data dir: {datadir}")
+    print(f"[InterPro] Output dir: {output_dir}")
+    print(f"[InterPro] Work dir: {workdir}")
+
     _run(["bash", "-lc", bash_command], cwd=MODULE_DIR)
 
     return _copy_first_tsv(nextflow_out, final_tsv)
@@ -150,6 +203,7 @@ def run_interpro_wsl(
     nxf_ver="25.04.6",
     revision="6.0.0",
     datadir=None,
+    interpro_data_dir=None,
     workdir=None,
     applications="pfam,ncbifam,superfamily",
     goterms=False,
@@ -158,10 +212,10 @@ def run_interpro_wsl(
 ):
     fasta_path = Path(fasta_path).resolve()
     output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    interpro_dir = output_dir / "interpro"
-    nextflow_out = interpro_dir / "nextflow_out"
-    final_tsv = interpro_dir / "interpro.tsv"
+    nextflow_out = output_dir / "nextflow_out"
+    final_tsv = output_dir / "interpro.tsv"
 
     if _nonempty(final_tsv) and not force:
         print(f"[InterPro] Existing output found. Skipping: {final_tsv}")
@@ -170,17 +224,22 @@ def run_interpro_wsl(
     if not fasta_path.exists():
         raise FileNotFoundError(f"[InterPro] Missing FASTA file: {fasta_path}")
 
+    if interpro_data_dir is not None and datadir is None:
+        datadir = interpro_data_dir
+
     if datadir is None:
-        datadir = MODULE_DIR / "interpro_data"
+        datadir = _default_interpro_data_dir()
     else:
         datadir = Path(datadir).resolve()
 
     if workdir is None:
-        workdir = interpro_dir / "interpro_work"
+        workdir = output_dir / "interpro_work"
     else:
         workdir = Path(workdir).resolve()
 
     nextflow_out.mkdir(parents=True, exist_ok=True)
+    datadir.mkdir(parents=True, exist_ok=True)
+    workdir.mkdir(parents=True, exist_ok=True)
 
     fasta_wsl = _win_to_wsl(fasta_path)
     nextflow_out_wsl = _win_to_wsl(nextflow_out)
@@ -220,6 +279,10 @@ NXF_VER={shlex.quote(str(nxf_ver))} nextflow run ebi-pf-team/interproscan6 \\
 """
 
     print("[InterPro] Running WSL Nextflow InterProScan.")
+    print(f"[InterPro] FASTA: {fasta_wsl}")
+    print(f"[InterPro] Data dir: {datadir_wsl}")
+    print(f"[InterPro] Output dir: {nextflow_out_wsl}")
+    print(f"[InterPro] Work dir: {workdir_wsl}")
 
     _run(
         ["wsl", "-d", wsl_distro, "--", "bash", "-lc", bash_command],
@@ -237,12 +300,19 @@ def run_interpro_tool(
     nxf_ver="25.04.6",
     revision="6.0.0",
     datadir=None,
+    interpro_data_dir=None,
     workdir=None,
     applications="pfam,ncbifam,superfamily",
     goterms=False,
     pathways=False,
     wsl_distro="Ubuntu",
 ):
+    if interpro_data_dir is not None and datadir is None:
+        datadir = interpro_data_dir
+
+    if datadir is None:
+        datadir = _default_interpro_data_dir()
+
     if mode == "local":
         return run_interpro_local(
             fasta_path=fasta_path,
