@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     git \
     ca-certificates \
-    openjdk-17-jre-headless \
+    default-jre-headless \
     hmmer \
     mafft \
     muscle \
