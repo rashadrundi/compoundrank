@@ -187,13 +187,59 @@ def run_python_tool(
         return False, logs
 
 
+INTERPRO_TSV_COLUMNS = [
+    "protein_accession",
+    "sequence_md5",
+    "sequence_length",
+    "analysis",
+    "signature_accession",
+    "signature_description",
+    "start",
+    "end",
+    "score",
+    "status",
+    "date",
+    "interpro_accession",
+    "interpro_description",
+    "go_annotations",
+    "pathways",
+]
+
+
 def read_table(path: Path, max_rows: int = 200) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
 
-    delimiter = "\t" if path.suffix.lower() in [".tsv", ".gff3"] else ","
-
     rows: List[Dict[str, Any]] = []
+
+    # Special case: InterProScan TSV usually has no header row.
+    if path.name == "interpro.tsv":
+        with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+            for idx, line in enumerate(f):
+                if idx >= max_rows:
+                    break
+
+                line = line.rstrip("\n")
+
+                if not line:
+                    continue
+
+                parts = line.split("\t")
+
+                row = {}
+
+                for col_idx, col_name in enumerate(INTERPRO_TSV_COLUMNS):
+                    row[col_name] = parts[col_idx] if col_idx < len(parts) else ""
+
+                # Preserve any extra fields just in case InterPro adds columns.
+                if len(parts) > len(INTERPRO_TSV_COLUMNS):
+                    row["extra_fields"] = parts[len(INTERPRO_TSV_COLUMNS):]
+
+                rows.append(row)
+
+        return rows
+
+    delimiter = "\t" if path.suffix.lower() in [".tsv", ".gff3"] else ","
 
     with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
         reader = csv.DictReader(f, delimiter=delimiter)
@@ -222,15 +268,17 @@ def tool_response(
     command: Optional[list[str]] = None,
     log_file: Optional[Path] = None,
 ) -> Dict[str, Any]:
+    rows = read_table(output_file) if output_file else []
+
     return {
         "status": status,
         "command": command or [],
         "output_file": str(output_file) if output_file else None,
         "log_file": str(log_file) if log_file else None,
-        "rows": read_table(output_file) if output_file else [],
+        "row_count_returned": len(rows),
+        "rows": rows,
         "error": error,
     }
-
 
 def validate_fasta(fasta_path: Path) -> None:
     text = fasta_path.read_text(encoding="utf-8", errors="replace").strip()
@@ -504,9 +552,24 @@ def run_cpu_analysis(upload_file) -> Dict[str, Any]:
         },
         "fasta_file": str(fasta_path),
         "job_dir": str(job_dir),
+
+        # Full tool objects, including output_file/log_file/status/rows/errors
         "cdd": cdd_result,
         "interpro": interpro_result,
         "vogdb": vogdb_result,
+
+        # Clean top-level results section
+        "results": {
+            "cdd": cdd_result.get("rows", []),
+            "interpro": interpro_result.get("rows", []),
+            "vogdb": vogdb_result.get("rows", []),
+        },
+
+        "result_counts": {
+            "cdd": len(cdd_result.get("rows", [])),
+            "interpro": len(interpro_result.get("rows", [])),
+            "vogdb": len(vogdb_result.get("rows", [])),
+        },
     }
 
     manifest_path = job_dir / "cpu_manifest.json"
