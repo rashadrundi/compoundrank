@@ -1,1 +1,0 @@
-(txid11320[Organism:exp] OR txid11520[Organism:exp]) AND neuraminidase

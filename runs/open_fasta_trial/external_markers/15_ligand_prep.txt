@@ -1,2 +1,0 @@
-### EXTERNAL TOOL REQUIRED HERE: Open Babel / Meeko ligand prep ###
-Prepare ligands after RDKit cleaning

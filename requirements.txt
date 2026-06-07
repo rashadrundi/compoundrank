@@ -6,3 +6,7 @@ networkx
 rdkit
 meeko
 tabulate
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic

@@ -1,2 +1,0 @@
-### EXTERNAL TOOL REQUIRED HERE: fpocket / P2Rank / PrankWeb / DoGSiteScorer ###
-Place outputs in pockets/

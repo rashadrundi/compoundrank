@@ -1,2 +1,0 @@
-### EXTERNAL TOOL REQUIRED HERE: InterProScan ###
-Place TSV at annotation/interpro/interpro.tsv

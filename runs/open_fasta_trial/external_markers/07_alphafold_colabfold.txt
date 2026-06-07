@@ -1,2 +1,0 @@
-### EXTERNAL TOOL REQUIRED HERE: AlphaFold / ColabFold ###
-Place model at structure/receptor.pdb and optional PAE at structure/pae.json
