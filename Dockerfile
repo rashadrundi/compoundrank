@@ -1,8 +1,7 @@
-FROM mambaorg/micromamba:1.5.8
+FROM python:3.12-slim
 
 USER root
 
-# System tools used by the pipeline / future external modules
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     curl \
@@ -17,31 +16,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tar \
     gzip \
     unzip \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy environment first for better Docker caching
-COPY environment.yml /app/environment.yml
+COPY requirements.txt /app/requirements.txt
 
-# Create the conda/mamba environment
-RUN micromamba create -y -n compoundrank -f /app/environment.yml \
-    && micromamba clean -a -y
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r /app/requirements.txt
 
-# Install Nextflow
 RUN curl -s https://get.nextflow.io | bash \
     && mv nextflow /usr/local/bin/nextflow \
     && chmod +x /usr/local/bin/nextflow
 
-# Copy project code
 COPY . /app
 
-# Make sure the environment is active for commands
-SHELL ["micromamba", "run", "-n", "compoundrank", "/bin/bash", "-c"]
+ENV COMPOUNDRANK_REPO_ROOT=/app
+ENV COMPOUNDRANK_DEPLOY_ROOT=/opt/compoundrank
+ENV COMPOUNDRANK_DATA_ROOT=/opt/compoundrank/data
+ENV COMPOUNDRANK_JOBS_ROOT=/opt/compoundrank/jobs
+ENV INTERPRO_DATA_ROOT=/opt/compoundrank/data/interpro_data
+ENV VOGDB_DATA_ROOT=/opt/compoundrank/data/vogdb_data
 
-# Install pip requirements too, in case environment.yml missed anything
-RUN if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+EXPOSE 8000
 
-ENV PATH="/opt/conda/envs/compoundrank/bin:${PATH}"
-
-CMD ["micromamba", "run", "-n", "compoundrank", "python", "-m", "uvicorn", "cpu_server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "cpu_server.app:app", "--host", "0.0.0.0", "--port", "8000"]
