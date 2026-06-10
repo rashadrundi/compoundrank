@@ -1,2 +1,0 @@
-### EXTERNAL TOOL REQUIRED HERE: VOGDB ###
-Place VOGDB hits at homologs/vogdb_hits.csv and homologs at homologs/homologs.fasta

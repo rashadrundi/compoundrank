@@ -1,8 +1,0 @@
-pandas
-pyyaml
-biopython
-numpy
-networkx
-rdkit
-meeko
-tabulate
