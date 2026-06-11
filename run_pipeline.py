@@ -4,11 +4,14 @@ import argparse
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from folding import run_colabfold
 from homolog_search import DEFAULT_API_URL, parse_cpu_response, post_fasta
+from structure_quality import write_quality_report
+from pocket_detection import run_fpocket
 
 
 FASTA_EXTENSIONS = {".fa", ".faa", ".fasta", ".fna"}
@@ -34,6 +37,88 @@ def save_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
+def run_cpu_branch(
+    api_url: str,
+    fasta_path: Path,
+    cpu_dir: Path,
+) -> dict[str, Any]:
+    print("\n[CPU] Sending FASTA to CPU API...")
+
+    raw_response = post_fasta(api_url, fasta_path)
+    parsed_cpu = parse_cpu_response(raw_response)
+
+    raw_path = cpu_dir / f"{fasta_path.stem}_post_response.json"
+    parsed_path = cpu_dir / f"{fasta_path.stem}_parsed_cpu_data.json"
+
+    save_json(raw_path, raw_response)
+    save_json(parsed_path, parsed_cpu)
+
+    print("\n[CPU] API complete.")
+    print(f"[CPU] Job ID: {parsed_cpu.get('job_id')}")
+    print(f"[CPU] Status: {parsed_cpu.get('status')}")
+    print(f"[CPU] CDD rows: {parsed_cpu['result_counts']['cdd']}")
+    print(f"[CPU] InterPro rows: {parsed_cpu['result_counts']['interpro']}")
+    print(f"[CPU] VOGDB rows: {parsed_cpu['result_counts']['vogdb']}")
+    print(f"[CPU] Raw response: {raw_path}")
+    print(f"[CPU] Parsed data: {parsed_path}")
+
+    return parsed_cpu
+
+
+def run_structure_branch(
+    fasta_path: Path,
+    output_dir: Path,
+    quick_test: bool,
+    overwrite_colabfold: bool,
+) -> dict[str, Any]:
+    colabfold_dir = output_dir / "colabfold"
+    quality_path = output_dir / "quality" / "structure_quality.json"
+    pocket_path = output_dir / "pockets" / "fpocket_summary.json"
+
+    print("\n[STRUCTURE] Starting local structure branch...")
+
+    best_pdb = run_colabfold(
+        fasta_path=fasta_path,
+        output_dir=colabfold_dir,
+        quick_test=quick_test,
+        overwrite=overwrite_colabfold,
+    )
+
+    print("\n[STRUCTURE] ColabFold complete.")
+    print(f"[STRUCTURE] Best PDB: {best_pdb}")
+
+    quality_report = write_quality_report(
+        colabfold_dir=colabfold_dir,
+        output_path=quality_path,
+        pdb_path=best_pdb,
+    )
+
+    print("\n[STRUCTURE] Quality extraction complete.")
+    print(
+        f"[STRUCTURE] Mean pLDDT: "
+        f"{quality_report['plddt']['mean_plddt']}"
+    )
+    print(
+        f"[STRUCTURE] PAE available: "
+        f"{quality_report['pae']['available']}"
+    )
+    print(f"[STRUCTURE] Quality report: {quality_path}")
+
+    pocket_result = run_fpocket(
+        pdb_path=best_pdb,
+        output_json=pocket_path,
+        overwrite=False,
+    )
+
+    print("\n[STRUCTURE] Pocket detection complete.")
+    print(f"[STRUCTURE] Pocket count: {pocket_result['pocket_count']}")
+    print(f"[STRUCTURE] Pocket summary: {pocket_path}")
+
+    return {
+        "best_pdb": str(best_pdb),
+        "quality": quality_report,
+        "pockets": pocket_result,
+    }
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -94,40 +179,58 @@ def main() -> int:
     if not fasta_path.exists():
         raise FileNotFoundError(f"FASTA file does not exist: {fasta_path}")
 
-    cpu_dir = output_dir / "cpu"
-    colabfold_dir = output_dir / "colabfold"
-
     print(f"FASTA: {fasta_path}")
 
-    if not args.skip_cpu:
-        raw_response = post_fasta(args.api_url, fasta_path)
-        parsed_cpu = parse_cpu_response(raw_response)
+    cpu_dir = output_dir / "cpu"
 
-        raw_path = cpu_dir / f"{fasta_path.stem}_post_response.json"
-        parsed_path = cpu_dir / f"{fasta_path.stem}_parsed_cpu_data.json"
+    futures = {}
+    results: dict[str, Any] = {}
+    errors: dict[str, Exception] = {}
 
-        save_json(raw_path, raw_response)
-        save_json(parsed_path, parsed_cpu)
+    print("\nStarting available pipeline branches concurrently...")
 
-        print("\nCPU API complete.")
-        print(f"Job ID: {parsed_cpu.get('job_id')}")
-        print(f"Status: {parsed_cpu.get('status')}")
-        print(f"CDD rows: {parsed_cpu['result_counts']['cdd']}")
-        print(f"InterPro rows: {parsed_cpu['result_counts']['interpro']}")
-        print(f"VOGDB rows: {parsed_cpu['result_counts']['vogdb']}")
-        print(f"Raw CPU response: {raw_path}")
-        print(f"Parsed CPU data: {parsed_path}")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        if not args.skip_cpu:
+            cpu_future = executor.submit(
+                run_cpu_branch,
+                args.api_url,
+                fasta_path,
+                cpu_dir,
+            )
+            futures[cpu_future] = "cpu"
 
-    if not args.skip_colabfold:
-        best_pdb = run_colabfold(
-            fasta_path=fasta_path,
-            output_dir=colabfold_dir,
-            quick_test=not args.full_colabfold,
-            overwrite=args.overwrite_colabfold,
+        if not args.skip_colabfold:
+            structure_future = executor.submit(
+                run_structure_branch,
+                fasta_path,
+                output_dir,
+                not args.full_colabfold,
+                args.overwrite_colabfold,
+            )
+            futures[structure_future] = "structure"
+
+        for future in as_completed(futures):
+            branch_name = futures[future]
+
+            try:
+                results[branch_name] = future.result()
+                print(f"\n[{branch_name.upper()}] Branch finished successfully.")
+
+            except Exception as error:
+                errors[branch_name] = error
+                print(
+                    f"\n[{branch_name.upper()}] Branch failed: {error}",
+                    file=sys.stderr,
+                )
+
+    if errors:
+        details = "; ".join(
+            f"{name}: {error}"
+            for name, error in errors.items()
         )
+        raise RuntimeError(f"One or more pipeline branches failed: {details}")
 
-        print("\nColabFold complete.")
-        print(f"Best PDB: {best_pdb}")
+    print("\nPipeline complete.")
 
     return 0
 

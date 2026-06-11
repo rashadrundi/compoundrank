@@ -1,70 +1,91 @@
 from __future__ import annotations
 
 import json
-import uuid
-import urllib.error
-import urllib.request
+import shutil
+import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_API_URL = "http://161.35.0.191:8000/analyze/fasta"
 
+def post_fasta(
+    api_url: str,
+    fasta_path: Path,
+    timeout_seconds: int = 7200,
+) -> dict[str, Any]:
+    fasta_path = Path(fasta_path).resolve()
 
-def build_multipart_body(file_path: Path, field_name: str = "file") -> tuple[bytes, str]:
-    boundary = f"----CompoundRankBoundary{uuid.uuid4().hex}"
-    filename = file_path.name
-    file_bytes = file_path.read_bytes()
+    if not fasta_path.exists():
+        raise FileNotFoundError(f"FASTA file does not exist: {fasta_path}")
 
-    body = b"".join([
-        f"--{boundary}\r\n".encode(),
-        (
-            f'Content-Disposition: form-data; name="{field_name}"; '
-            f'filename="{filename}"\r\n'
-        ).encode(),
-        b"Content-Type: application/octet-stream\r\n\r\n",
-        file_bytes,
-        b"\r\n",
-        f"--{boundary}--\r\n".encode(),
-    ])
+    curl_path = shutil.which("curl")
 
-    content_type = f"multipart/form-data; boundary={boundary}"
-    return body, content_type
+    if curl_path is None:
+        raise RuntimeError("curl was not found on PATH")
 
-
-def post_fasta(api_url: str, fasta_path: Path, timeout_seconds: int = 3600) -> dict[str, Any]:
-    body, content_type = build_multipart_body(fasta_path)
-
-    request = urllib.request.Request(
+    command = [
+        curl_path,
+        "--silent",
+        "--show-error",
+        "--fail-with-body",
+        "--connect-timeout",
+        "20",
+        "--max-time",
+        str(timeout_seconds),
+        "--request",
+        "POST",
         api_url,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": content_type,
-            "Content-Length": str(len(body)),
-        },
+        "--header",
+        "Accept: application/json",
+        "--form",
+        f"file=@{fasta_path};type=application/octet-stream",
+    ]
+
+    print(f"[CPU] Sending POST request to: {api_url}", flush=True)
+    print(f"[CPU] FASTA: {fasta_path}", flush=True)
+
+    started_at = time.monotonic()
+
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
+    elapsed = time.monotonic() - started_at
+
+    print(
+        f"[CPU] curl finished after {elapsed:.1f} seconds "
+        f"with exit code {completed.returncode}",
+        flush=True,
+    )
+
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "CPU API curl request failed.\n\n"
+            f"Exit code: {completed.returncode}\n"
+            f"STDERR:\n{completed.stderr}\n"
+            f"RESPONSE BODY:\n{completed.stdout[:3000]}"
+        )
+
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            response_text = response.read().decode("utf-8", errors="replace")
-            status_code = response.status
-
-    except urllib.error.HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP error from CPU API: {error.code}\n{error_body}") from error
-
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Could not reach CPU API: {error}") from error
-
-    try:
-        return json.loads(response_text)
+        response_data = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise RuntimeError(
-            f"CPU API returned HTTP {status_code}, but response was not JSON:\n"
-            f"{response_text[:1000]}"
+            "CPU API returned a response, but it was not valid JSON.\n\n"
+            f"Response:\n{completed.stdout[:3000]}\n"
+            f"STDERR:\n{completed.stderr}"
         ) from error
 
+    if not isinstance(response_data, dict):
+        raise RuntimeError(
+            "CPU API returned valid JSON, but the top-level value "
+            "was not an object."
+        )
+
+    return response_data
 
 def get_rows(api_response: dict[str, Any], tool_name: str) -> list[dict[str, Any]]:
     results = api_response.get("results", {})

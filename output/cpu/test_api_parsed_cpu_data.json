@@ -1,0 +1,61 @@
+{
+  "job_id": "d9018ea1-6177-494f-9b87-6a47182ccc9c",
+  "status": "complete",
+  "result_counts": {
+    "cdd": 1,
+    "interpro": 1,
+    "vogdb": 0
+  },
+  "rows": {
+    "cdd": [
+      {
+        "source": "CDD",
+        "name": "P53_TAD superfamily",
+        "accession": "cl07246",
+        "start": "6",
+        "end": "29",
+        "evalue": "0.000225374",
+        "score": "32.525",
+        "notes": "hit_type=superfamily; pssm_id=462520; query=Q#1 - >test_protein; superfamily= - "
+      }
+    ],
+    "interpro": [
+      {
+        "protein_accession": "test_protein",
+        "sequence_md5": "2B84E90A1C60DC92C8D876B82037FF41",
+        "sequence_length": "29",
+        "analysis": "Pfam",
+        "signature_accession": "PF08563",
+        "signature_description": "P53 transactivation motif",
+        "start": "6",
+        "end": "29",
+        "score": "4.3E-10",
+        "status": "Pfam",
+        "date": "10-06-2026",
+        "interpro_accession": "IPR013872",
+        "interpro_description": "p53, transactivation domain",
+        "go_annotations": "-",
+        "pathways": "-"
+      }
+    ],
+    "vogdb": []
+  },
+  "files": {
+    "input_fasta": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/input/protein.fasta",
+    "manifest": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/cpu_manifest.json",
+    "local_handoff_json": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/cpu_to_local_handoff.json",
+    "cdd_csv": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/annotation/cdd/cdd_results.csv",
+    "cdd_log": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/annotation/cdd/cdd.log",
+    "interpro_tsv": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/annotation/interpro/interpro.tsv",
+    "interpro_log": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/annotation/interpro/interpro.log",
+    "interpro_gff3": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/annotation/interpro/nextflow_out/protein.fasta.gff3",
+    "interpro_json": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/annotation/interpro/nextflow_out/protein.fasta.json",
+    "interpro_jsonl": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/annotation/interpro/nextflow_out/protein.fasta.jsonl",
+    "interpro_xml": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/annotation/interpro/nextflow_out/protein.fasta.xml",
+    "vogdb_csv": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/homologs/vogdb_hits.csv",
+    "vogdb_log": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/homologs/vogdb.log",
+    "vogdb_tblout": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/homologs/vogdb_raw/vogdb.tblout",
+    "vogdb_domtblout": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/homologs/vogdb_raw/vogdb.domtblout",
+    "vogdb_hmmscan_txt": "/opt/compoundrank/jobs/d9018ea1-6177-494f-9b87-6a47182ccc9c/homologs/vogdb_raw/vogdb.hmmscan.txt"
+  }
+}

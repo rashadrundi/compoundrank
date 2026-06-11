@@ -1,0 +1,2 @@
+#!/bin/bash
+pymol test_protein_unrelaxed_rank_001_alphafold2_ptm_model_1_seed_000.pml
