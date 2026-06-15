@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
 from pathlib import Path
 from typing import Iterable
@@ -7,6 +8,7 @@ from typing import Iterable
 from .clustering import cluster_pose_hypotheses
 from .export import write_complex_pdb
 from .gnina import run_gnina_ensemble
+from .homolog_search import DEFAULT_API_URL, run_homolog_search
 from .interactions import summarize_interactions
 from .ligand import LigandRequest, prepare_ligand
 from .models import LigandResult
@@ -73,6 +75,9 @@ def run_pipeline(
     overwrite: bool,
     cpu: int | None,
     device: int | None,
+    fasta_path: Path | None = None,
+    homolog_api_url: str = DEFAULT_API_URL,
+    homolog_timeout_seconds: int = 7200,
 ) -> list[Path]:
     cache_root = data_root / "cache"
     work_root = data_root / "work"
@@ -90,6 +95,25 @@ def run_pipeline(
     if overwrite:
         for path in output_dir.glob("*.pdb"):
             path.unlink()
+        for path in output_dir.glob("homolog_search_*.json"):
+            path.unlink()
+
+    homology_executor: ThreadPoolExecutor | None = None
+    homology_future = None
+
+    if fasta_path is not None:
+        print(f"[HOMOLOGY] Starting CPU homolog search in background: {fasta_path}")
+        homology_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="compoundrank-homology",
+        )
+        homology_future = homology_executor.submit(
+            run_homolog_search,
+            fasta_path=Path(fasta_path),
+            output_dir=output_dir,
+            api_url=homolog_api_url,
+            timeout_seconds=homolog_timeout_seconds,
+        )
 
     temporary: tempfile.TemporaryDirectory[str] | None = None
 
@@ -267,9 +291,28 @@ def run_pipeline(
         for path in written:
             print(path)
 
+        if homology_future is not None:
+            print("\n[HOMOLOGY] Waiting for CPU homolog search to finish")
+            homology_result = homology_future.result()
+
+            if homology_result.get("status") == "ok":
+                print("[HOMOLOGY] Completed successfully")
+                print(f"[HOMOLOGY] Summary: {homology_result.get('summary_output')}")
+                print(f"[HOMOLOGY] Counts: {homology_result.get('result_counts')}")
+            else:
+                print("[HOMOLOGY] Failed; docking outputs were still preserved")
+                print(f"[HOMOLOGY] Error file: {homology_result.get('error_output')}")
+                print(f"[HOMOLOGY] Error: {homology_result.get('error')}")
+
         return written
 
     finally:
+        if homology_executor is not None:
+            homology_executor.shutdown(
+                wait=False,
+                cancel_futures=True,
+            )
+
         if cleanup and temporary is not None:
             temporary.cleanup()
         else:

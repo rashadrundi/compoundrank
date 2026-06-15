@@ -11,6 +11,7 @@ from .paths import (
     require_absolute_external_file,
     sanitize_name,
 )
+from .homolog_search import DEFAULT_API_URL
 from .pipeline import run_pipeline
 
 
@@ -35,6 +36,29 @@ def build_parser() -> argparse.ArgumentParser:
         help='Repeatable NAME=SMILES value',
     )
     parser.add_argument("--ligand-manifest", default=None)
+
+    parser.add_argument(
+        "--fasta",
+        type=Path,
+        default=None,
+        help=(
+            "Optional protein FASTA to send to the CPU annotation/homolog API. "
+            "Runs concurrently with docking and writes homolog_search_*.json "
+            "into the run output directory."
+        ),
+    )
+    parser.add_argument(
+        "--homolog-api-url",
+        default=DEFAULT_API_URL,
+        help="CPU homolog/annotation API endpoint for --fasta.",
+    )
+    parser.add_argument(
+        "--homolog-timeout-seconds",
+        type=int,
+        default=7200,
+        help="Maximum time to wait for the CPU homolog/annotation API request.",
+    )
+
 
     parser.add_argument("--center-x", type=float)
     parser.add_argument("--center-y", type=float)
@@ -151,6 +175,9 @@ def main(argv: list[str] | None = None) -> int:
         ligand_requests=requests,
         data_root=data_root,
         output_dir=output_dir,
+        fasta_path=args.fasta,
+        homolog_api_url=args.homolog_api_url,
+        homolog_timeout_seconds=args.homolog_timeout_seconds,
         seeds=args.seeds,
         center_x=args.center_x,
         center_y=args.center_y,
