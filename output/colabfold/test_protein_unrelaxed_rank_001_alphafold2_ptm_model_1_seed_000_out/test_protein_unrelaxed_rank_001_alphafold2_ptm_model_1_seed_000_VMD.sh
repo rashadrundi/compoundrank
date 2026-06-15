@@ -1,2 +1,0 @@
-#!/bin/bash
-vmd test_protein_unrelaxed_rank_001_alphafold2_ptm_model_1_seed_000_out.pdb -e test_protein_unrelaxed_rank_001_alphafold2_ptm_model_1_seed_000.tcl
