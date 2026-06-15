@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "compoundrank-local"
+version = "0.2.0"
+description = "GNINA-scored binding hypotheses with physical-validity filtering and uncertainty"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy>=1.26",
+  "rdkit>=2024.3",
+  "meeko>=0.6",
+  "pdb2pqr>=3.6",
+]
+
+[project.scripts]
+compoundrank = "compoundrank.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["compoundrank*"]

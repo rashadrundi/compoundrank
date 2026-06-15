@@ -1,0 +1,4 @@
+name,source_type,value
+darunavir,file,/absolute/path/to/darunavir.sdf
+saquinavir,cid,441243
+example_smiles,smiles,CCO

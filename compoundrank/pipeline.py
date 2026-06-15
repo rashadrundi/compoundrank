@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Iterable
+
+from .clustering import cluster_pose_hypotheses
+from .export import write_complex_pdb
+from .gnina import run_gnina_ensemble
+from .interactions import summarize_interactions
+from .ligand import LigandRequest, prepare_ligand
+from .models import LigandResult, PocketDefinition
+from .pocket import build_pocket_definition
+from .receptor import prepare_receptor
+from .uncertainty import assess_uncertainty
+from .validity import filter_poses_with_posebusters
+
+
+def _top_score(result: LigandResult) -> float:
+    if result.top_score is None:
+        return float("-inf")
+    return result.top_score
+
+
+def run_pipeline(
+    *,
+    receptor_pdb: Path,
+    ligand_requests: Iterable[LigandRequest],
+    data_root: Path,
+    output_dir: Path,
+    seeds: list[int],
+    center_x: float | None,
+    center_y: float | None,
+    center_z: float | None,
+    size_x: float | None,
+    size_y: float | None,
+    size_z: float | None,
+    autobox_ligand: Path | None,
+    fpocket_padding: float,
+    fpocket_pocket: int | None,
+    max_hypotheses: int,
+    cluster_threshold: float,
+    exhaustiveness: int,
+    num_modes: int,
+    cnn_scoring: str,
+    ph: float,
+    gnina_bin: str,
+    fpocket_bin: str,
+    obabel_bin: str,
+    pdb2pqr_bin: str,
+    meeko_receptor_bin: str,
+    meeko_ligand_bin: str,
+    posebusters_bin: str,
+    skip_validity: bool,
+    keep_workdir: bool,
+    overwrite: bool,
+    cpu: int | None,
+    device: int | None,
+) -> list[Path]:
+    cache_root = data_root / "cache"
+    work_root = data_root / "work"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    work_root.mkdir(parents=True, exist_ok=True)
+
+    if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
+        raise FileExistsError(
+            f"Output directory is not empty: {output_dir}. Use --overwrite."
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if overwrite:
+        for path in output_dir.glob("*.pdb"):
+            path.unlink()
+
+    if keep_workdir:
+        work_dir = Path(tempfile.mkdtemp(prefix="compoundrank-", dir=work_root))
+        cleanup = False
+    else:
+        temporary = tempfile.TemporaryDirectory(prefix="compoundrank-", dir=work_root)
+        work_dir = Path(temporary.name)
+        cleanup = True
+
+    print(f"[PATHS] Work directory: {work_dir}")
+    print(f"[PATHS] Cache directory: {cache_root}")
+    print(f"[PATHS] Final results: {output_dir}")
+
+    try:
+        receptor = prepare_receptor(
+            receptor_pdb,
+            cache_root,
+            ph=ph,
+            pdb2pqr_bin=pdb2pqr_bin,
+            meeko_receptor_bin=meeko_receptor_bin,
+        )
+        pocket = build_pocket_definition(
+            receptor_pdb=receptor.display_pdb,
+            work_dir=work_dir / "pocket",
+            explicit_values=(center_x, center_y, center_z, size_x, size_y, size_z),
+            autobox_ligand=autobox_ligand,
+            fpocket_padding=fpocket_padding,
+            fpocket_pocket=fpocket_pocket,
+            fpocket_bin=fpocket_bin,
+        )
+        print(f"[POCKET] {pocket.source or pocket.mode}")
+
+        ligand_results: list[LigandResult] = []
+        for request in ligand_requests:
+            print(f"\n[LIGAND] Preparing {request.name}")
+            ligand = prepare_ligand(
+                request,
+                cache_root,
+                ph=ph,
+                obabel_bin=obabel_bin,
+                meeko_ligand_bin=meeko_ligand_bin,
+            )
+            raw_records = run_gnina_ensemble(
+                receptor,
+                ligand,
+                pocket,
+                seeds,
+                work_dir / "docking",
+                exhaustiveness=exhaustiveness,
+                num_modes=num_modes,
+                cnn_scoring=cnn_scoring,
+                gnina_bin=gnina_bin,
+                cpu=cpu,
+                device=device,
+            )
+            valid_records, failures = filter_poses_with_posebusters(
+                raw_records,
+                receptor.display_pdb,
+                work_dir / "validity" / ligand.name,
+                posebusters_bin=posebusters_bin,
+                skip=skip_validity,
+            )
+            print(f"[VALIDITY] Failure records: {len(failures)}")
+            clusters = cluster_pose_hypotheses(
+                valid_records,
+                rmsd_threshold=cluster_threshold,
+            )
+            uncertainty, reasons = assess_uncertainty(clusters, len(seeds))
+            top_score = (
+                clusters[0].representative.cnn_score if clusters else None
+            )
+            ligand_results.append(
+                LigandResult(
+                    ligand=ligand,
+                    clusters=clusters,
+                    uncertainty=uncertainty,
+                    uncertainty_reasons=reasons,
+                    top_score=top_score,
+                )
+            )
+            print(
+                f"[HYPOTHESES] {ligand.name}: {len(clusters)} clusters; "
+                f"uncertainty={uncertainty}"
+            )
+
+        ligand_results.sort(key=_top_score, reverse=True)
+        written: list[Path] = []
+        for compound_rank, result in enumerate(ligand_results, start=1):
+            selected_clusters = result.clusters[:max_hypotheses]
+            for hypothesis_rank, cluster in enumerate(selected_clusters, start=1):
+                evidence = summarize_interactions(
+                    receptor.display_pdb,
+                    cluster.representative.molecule,
+                )
+                output_path = output_dir / (
+                    f"{compound_rank:02d}__{result.ligand.name}__"
+                    f"hypothesis_{hypothesis_rank:02d}.pdb"
+                )
+                write_complex_pdb(
+                    output_path,
+                    receptor.display_pdb,
+                    result,
+                    cluster,
+                    evidence,
+                    pocket,
+                    compound_priority_rank=compound_rank,
+                    hypothesis_rank=hypothesis_rank,
+                    hypothesis_count=len(selected_clusters),
+                )
+                written.append(output_path)
+
+        print("\n=== COMPOUND PRIORITY BY GNINA CNN SCORE ===")
+        for rank, result in enumerate(ligand_results, start=1):
+            print(
+                f"{rank:2d}. {result.ligand.name}: "
+                f"CNNscore={result.top_score if result.top_score is not None else 'N/A'}; "
+                f"uncertainty={result.uncertainty}; "
+                f"clusters={len(result.clusters)}"
+            )
+        print("\nFinal PDB files:")
+        for path in written:
+            print(path)
+        return written
+    finally:
+        if cleanup:
+            temporary.cleanup()
+        else:
+            print(f"[DEBUG] Work directory retained: {work_dir}")

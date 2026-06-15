@@ -1,13 +1,26 @@
-FROM python:3.12-slim
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PATH=/opt/gnina:${PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    openbabel \
+    fpocket \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY requirements.txt pyproject.toml /app/
+COPY compoundrank /app/compoundrank
+COPY run_pipeline.py /app/
 
-COPY requirements.txt /app/requirements.txt
-RUN python -m pip install --upgrade pip && \
-    python -m pip install -r /app/requirements.txt
+RUN python3 -m pip install --break-system-packages --no-cache-dir .
 
-COPY homolog_search.py /app/homolog_search.py
-COPY folding.py /app/folding.py
-COPY run_pipeline.py /app/run_pipeline.py
-
-CMD ["python", "run_pipeline.py"]
+# GNINA is GPU/CUDA-specific and is intentionally not baked into this image.
+# Mount a working GNINA binary at /opt/gnina/gnina or extend this image.
+ENTRYPOINT ["compoundrank"]

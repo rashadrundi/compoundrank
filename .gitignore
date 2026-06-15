@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.bak
+.pytest_cache/
+.venv/
+
+# Runtime scientific data must remain external.
+/input/
+/output/
+/results/
+/work/
+/cache/
+
+# Generated chemistry/docking intermediates.
+*.pdbqt
+*.sdf
+*.sd
+*.mol2
+*.pqr
+*.a3m
+*.done.txt
+*_out/
