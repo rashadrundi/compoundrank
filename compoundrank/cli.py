@@ -45,6 +45,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--autobox-ligand", default=None)
     parser.add_argument("--fpocket-padding", type=float, default=4.0)
     parser.add_argument("--fpocket-pocket", type=int, default=None)
+    parser.add_argument(
+        "--fpocket-top-n",
+        type=int,
+        default=1,
+        help=(
+            "When no explicit box or autobox ligand is provided, dock the top N "
+            "fpocket pockets instead of only the highest-scoring pocket."
+        ),
+    )
 
     parser.add_argument("--seeds", nargs="+", type=int, default=[2026, 3101, 4202])
     parser.add_argument("--exhaustiveness", type=int, default=32)
@@ -152,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         autobox_ligand=autobox_ligand,
         fpocket_padding=args.fpocket_padding,
         fpocket_pocket=args.fpocket_pocket,
+        fpocket_top_n=args.fpocket_top_n,
         max_hypotheses=args.max_hypotheses,
         cluster_threshold=args.cluster_threshold,
         exhaustiveness=args.exhaustiveness,
