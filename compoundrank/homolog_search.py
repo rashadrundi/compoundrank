@@ -8,6 +8,8 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from .target_evidence import build_target_evidence, write_target_evidence_outputs
+
 DEFAULT_API_URL = "http://161.35.0.191:8000/analyze/fasta"
 
 
@@ -185,12 +187,24 @@ def run_homolog_search(
             parsed,
         )
 
+        target_evidence = build_target_evidence(
+            parsed,
+            source_fasta=str(fasta_path.resolve()),
+        )
+
+        target_outputs = write_target_evidence_outputs(
+            target_evidence,
+            output_dir,
+        )
+
         return {
             "status": "ok",
             "api_url": api_url,
             "fasta_path": str(fasta_path.resolve()),
             "raw_output": str(raw_output),
             "summary_output": str(summary_output),
+            "target_evidence": target_outputs.get("target_evidence"),
+            "target_evidence_report": target_outputs.get("target_evidence_report"),
             "result_counts": parsed.get("result_counts", {}),
         }
 
