@@ -37,6 +37,18 @@ def _extract_float(text: str) -> float | None:
         return None
 
 
+def _extract_float_after_keyword(text: str, keyword: str) -> float | None:
+    upper = text.upper()
+    keyword_upper = keyword.upper()
+
+    index = upper.find(keyword_upper)
+    if index == -1:
+        return None
+
+    value_text = text[index + len(keyword):].strip()
+    return _extract_float(value_text)
+
+
 def _parse_pdb_remark_metadata(path: Path) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
 
@@ -56,7 +68,7 @@ def _parse_pdb_remark_metadata(path: Path) -> dict[str, Any]:
         upper = clean.upper()
 
         if "GNINA CNN SCORE" in upper:
-            value = _extract_float(clean)
+            value = _extract_float_after_keyword(clean, "GNINA CNN SCORE")
             if value is not None:
                 metadata["gnina_cnn_score"] = value
 
@@ -70,7 +82,7 @@ def _parse_pdb_remark_metadata(path: Path) -> dict[str, Any]:
             metadata["pocket_source"] = clean.split("POCKET SOURCE", 1)[-1].strip()
 
         elif "FPOCKET SCORE" in upper:
-            value = _extract_float(clean)
+            value = _extract_float_after_keyword(clean, "FPOCKET SCORE")
             if value is not None:
                 metadata["fpocket_score"] = value
 
