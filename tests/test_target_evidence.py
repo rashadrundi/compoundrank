@@ -18,8 +18,14 @@ class TargetEvidenceTests(unittest.TestCase):
             "rows": {
                 "cdd": [
                     {
-                        "name": "HIV-1 protease",
-                        "description": "retropepsin aspartyl protease peptidase",
+                        "source": "CDD",
+                        "name": "RVP",
+                        "accession": "pfam00077",
+                        "start": "5",
+                        "end": "98",
+                        "evalue": "5.77331e-36",
+                        "score": "117.468",
+                        "notes": "specific retroviral protease domain; retropepsin aspartyl protease",
                     }
                 ],
                 "interpro": [

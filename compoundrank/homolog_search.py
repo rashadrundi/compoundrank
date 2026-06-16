@@ -112,6 +112,26 @@ def get_rows(
 
 
 def parse_cpu_response(api_response: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(api_response.get("rows"), dict):
+        rows = api_response.get("rows", {})
+
+        normalized_rows: dict[str, list[dict[str, Any]]] = {}
+        for tool_name in ("cdd", "interpro", "vogdb"):
+            tool_rows = rows.get(tool_name, [])
+            normalized_rows[tool_name] = tool_rows if isinstance(tool_rows, list) else []
+
+        return {
+            "job_id": api_response.get("job_id"),
+            "status": api_response.get("status"),
+            "files": api_response.get("files", {}),
+            "result_counts": {
+                "cdd": len(normalized_rows["cdd"]),
+                "interpro": len(normalized_rows["interpro"]),
+                "vogdb": len(normalized_rows["vogdb"]),
+            },
+            "rows": normalized_rows,
+        }
+
     cdd_rows = get_rows(api_response, "cdd")
     interpro_rows = get_rows(api_response, "interpro")
     vogdb_rows = get_rows(api_response, "vogdb")
