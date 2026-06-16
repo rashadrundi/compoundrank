@@ -16,6 +16,7 @@ from .pocket import build_pocket_definitions
 from .receptor import prepare_receptor
 from .uncertainty import assess_uncertainty
 from .validity import filter_poses_with_posebusters
+from .run_report import write_run_report
 
 
 def _top_score(result: LigandResult) -> float:
@@ -298,11 +299,25 @@ def run_pipeline(
             if homology_result.get("status") == "ok":
                 print("[HOMOLOGY] Completed successfully")
                 print(f"[HOMOLOGY] Summary: {homology_result.get('summary_output')}")
+
+                target_evidence_output = homology_result.get("target_evidence")
+                if target_evidence_output:
+                    print(f"[HOMOLOGY] Target evidence: {target_evidence_output}")
+
+                target_evidence_report = homology_result.get("target_evidence_report")
+                if target_evidence_report:
+                    print(f"[HOMOLOGY] Target evidence report: {target_evidence_report}")
+
                 print(f"[HOMOLOGY] Counts: {homology_result.get('result_counts')}")
             else:
                 print("[HOMOLOGY] Failed; docking outputs were still preserved")
                 print(f"[HOMOLOGY] Error file: {homology_result.get('error_output')}")
                 print(f"[HOMOLOGY] Error: {homology_result.get('error')}")
+
+        run_report_path = write_run_report(
+            output_dir=output_dir,
+        )
+        print(f"\n[REPORT] Run report: {run_report_path}")
 
         return written
 
