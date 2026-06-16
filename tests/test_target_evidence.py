@@ -39,6 +39,8 @@ class TargetEvidenceTests(unittest.TestCase):
         self.assertEqual(interpretation["target_class"], "viral protease")
         self.assertEqual(interpretation["enzyme_class"], "aspartyl protease")
         self.assertEqual(interpretation["docking_priority"], "high")
+        self.assertEqual(interpretation["evidence_confidence"], "high")
+        self.assertIn("retroviral", interpretation["target_name"].lower())
         self.assertIn(
             "HIV protease inhibitor",
             future_query["query_terms"],

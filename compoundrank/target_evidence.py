@@ -177,6 +177,25 @@ TARGET_RULES = [
 ]
 
 
+SPECIAL_DOMAIN_RULES = [
+    {
+        "match_names": ["RVP"],
+        "match_accessions": ["pfam00077", "PF00077"],
+        "label": "Retroviral aspartyl protease domain",
+        "target_name": "HIV-like retroviral aspartyl protease",
+        "target_class": "viral protease",
+        "enzyme_class": "aspartyl protease",
+        "viral_family": "Retroviridae-like / retroviral",
+        "matched_terms": ["RVP", "pfam00077", "retroviral protease domain"],
+        "confidence": "high",
+        "confidence_reason": (
+            "Specific CDD/Pfam retroviral protease domain evidence was detected. "
+            "This is stronger than generic keyword matching."
+        ),
+    }
+]
+
+
 def _flatten_text(value: Any) -> str:
     if value is None:
         return ""
@@ -271,7 +290,61 @@ def _score_rules(search_text: str) -> list[dict[str, Any]]:
     return scored
 
 
-def _confidence(best_score: int, total_hits: int) -> str:
+def _detect_special_domain(summary: dict[str, Any]) -> dict[str, Any] | None:
+    rows = summary.get("rows", {})
+    if not isinstance(rows, dict):
+        return None
+
+    for tool_name, tool_rows in rows.items():
+        if not isinstance(tool_rows, list):
+            continue
+
+        for row in tool_rows:
+            if not isinstance(row, dict):
+                continue
+
+            row_name = str(row.get("name", "")).strip()
+            row_accession = str(row.get("accession", "")).strip()
+            row_text = _flatten_text(row).lower()
+
+            for rule in SPECIAL_DOMAIN_RULES:
+                name_match = row_name in rule["match_names"]
+                accession_match = row_accession in rule["match_accessions"]
+                text_match = any(
+                    term.lower() in row_text
+                    for term in rule["match_names"] + rule["match_accessions"]
+                )
+
+                if name_match or accession_match or text_match:
+                    return {
+                        "label": rule["label"],
+                        "tool": tool_name,
+                        "hit_name": row_name,
+                        "accession": row_accession,
+                        "start": row.get("start"),
+                        "end": row.get("end"),
+                        "evalue": row.get("evalue"),
+                        "score": row.get("score"),
+                        "target_name": rule["target_name"],
+                        "target_class": rule["target_class"],
+                        "enzyme_class": rule["enzyme_class"],
+                        "viral_family": rule["viral_family"],
+                        "matched_terms": rule["matched_terms"],
+                        "confidence": rule["confidence"],
+                        "confidence_reason": rule["confidence_reason"],
+                    }
+
+    return None
+
+
+def _confidence(
+    best_score: int,
+    total_hits: int,
+    *,
+    special_domain: dict[str, Any] | None = None,
+) -> str:
+    if special_domain is not None:
+        return str(special_domain.get("confidence", "high"))
     if best_score >= 3 and total_hits >= 2:
         return "high"
     if best_score >= 2 or total_hits >= 3:
@@ -279,6 +352,49 @@ def _confidence(best_score: int, total_hits: int) -> str:
     if best_score >= 1:
         return "low"
     return "unknown"
+
+
+def _confidence_reasoning(
+    *,
+    confidence: str,
+    best_score: int,
+    total_hits: int,
+    special_domain: dict[str, Any] | None,
+    summary: dict[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+
+    if special_domain is not None:
+        reasons.append(str(special_domain["confidence_reason"]))
+        reasons.append(
+            "Special domain evidence: "
+            f"{special_domain.get('label')} "
+            f"({special_domain.get('hit_name')}/{special_domain.get('accession')}), "
+            f"e-value={special_domain.get('evalue')}, "
+            f"score={special_domain.get('score')}."
+        )
+
+    result_counts = summary.get("result_counts", {})
+    if isinstance(result_counts, dict):
+        reasons.append(
+            "Annotation support counts: "
+            f"CDD={result_counts.get('cdd', 0)}, "
+            f"InterPro={result_counts.get('interpro', 0)}, "
+            f"VOGDB={result_counts.get('vogdb', 0)}."
+        )
+
+    status = summary.get("status")
+    if status and status != "complete":
+        reasons.append(
+            f"CPU annotation status was {status}; confidence is based on available successful tool outputs."
+        )
+
+    if not reasons:
+        reasons.append(
+            f"Confidence={confidence} based on {best_score} matched keyword(s) across {total_hits} supporting hit(s)."
+        )
+
+    return reasons
 
 
 def _default_unknown_evidence(summary: dict[str, Any], hits: list[dict[str, Any]]) -> dict[str, Any]:
@@ -330,19 +446,43 @@ def build_target_evidence(
     search_text = _flatten_text(summary)
     scored_rules = _score_rules(search_text)
     best = scored_rules[0] if scored_rules else {"score": 0, "rule": None, "matched_keywords": []}
+    special_domain = _detect_special_domain(summary)
 
-    if best["score"] <= 0:
+    if best["score"] <= 0 and special_domain is None:
         evidence = _default_unknown_evidence(summary, hits)
     else:
         rule = best["rule"]
-        confidence = _confidence(best["score"], len(hits))
 
-        target_name = rule["target_class"]
-        if rule["target_class"] == "viral protease" and any(
-            keyword in search_text.lower()
-            for keyword in ("hiv", "retropepsin", "aspartyl", "aspartic")
-        ):
-            target_name = "HIV-like viral aspartyl protease"
+        if special_domain is not None:
+            for candidate_rule in TARGET_RULES:
+                if candidate_rule["target_class"] == special_domain["target_class"]:
+                    rule = candidate_rule
+                    break
+
+        confidence = _confidence(
+            best["score"],
+            len(hits),
+            special_domain=special_domain,
+        )
+
+        if special_domain is not None:
+            target_name = str(special_domain["target_name"])
+            viral_family = str(special_domain["viral_family"])
+            predicted_function = (
+                f"Likely {special_domain['target_name']} based on specific domain evidence."
+            )
+        else:
+            target_name = rule["target_class"]
+            viral_family = "unknown"
+            if rule["target_class"] == "viral protease" and any(
+                keyword in search_text.lower()
+                for keyword in ("hiv", "retropepsin", "aspartyl", "aspartic")
+            ):
+                target_name = "HIV-like viral aspartyl protease"
+
+            predicted_function = (
+                f"Likely {rule['target_class']} based on annotation and homology keyword evidence."
+            )
 
         evidence = {
             "schema_version": "target_evidence.v0.1",
@@ -356,15 +496,30 @@ def build_target_evidence(
                 "target_name": target_name,
                 "target_class": rule["target_class"],
                 "enzyme_class": rule["enzyme_class"],
-                "viral_family": "unknown",
-                "predicted_function": (
-                    f"Likely {rule['target_class']} based on annotation and homology keyword evidence."
-                ),
+                "viral_family": viral_family,
+                "predicted_function": predicted_function,
                 "docking_priority": rule["docking_priority"],
                 "evidence_confidence": confidence,
             },
             "evidence": {
-                "matched_keywords": best["matched_keywords"],
+                "matched_keywords": list(
+                    dict.fromkeys(
+                        list(best.get("matched_keywords", []))
+                        + (
+                            list(special_domain.get("matched_terms", []))
+                            if special_domain is not None
+                            else []
+                        )
+                    )
+                ),
+                "special_domain_evidence": special_domain,
+                "confidence_reasoning": _confidence_reasoning(
+                    confidence=confidence,
+                    best_score=best["score"],
+                    total_hits=len(hits),
+                    special_domain=special_domain,
+                    summary=summary,
+                ),
                 "supporting_hits": hits[:10],
             },
             "future_ligand_database_query": {
@@ -430,6 +585,7 @@ def render_target_evidence_report(evidence: dict[str, Any]) -> str:
     interpretation = evidence.get("target_interpretation", {})
     future_query = evidence.get("future_ligand_database_query", {})
     evidence_block = evidence.get("evidence", {})
+    source = evidence.get("source", {})
 
     lines = [
         "# Target Evidence Report",
@@ -439,10 +595,45 @@ def render_target_evidence_report(evidence: dict[str, Any]) -> str:
         f"- Target name: {interpretation.get('target_name')}",
         f"- Target class: {interpretation.get('target_class')}",
         f"- Enzyme class: {interpretation.get('enzyme_class')}",
+        f"- Viral family evidence: {interpretation.get('viral_family')}",
         f"- Docking priority: {interpretation.get('docking_priority')}",
         f"- Evidence confidence: {interpretation.get('evidence_confidence')}",
+        f"- Predicted function: {interpretation.get('predicted_function')}",
         "",
-        "## Matched keywords",
+        "## Annotation source status",
+        "",
+        f"- CPU annotation status: {source.get('status')}",
+        f"- Result counts: {source.get('result_counts')}",
+        "",
+        "## Evidence assessment",
+        "",
+    ]
+
+    confidence_reasoning = evidence_block.get("confidence_reasoning", [])
+    if confidence_reasoning:
+        for reason in confidence_reasoning:
+            lines.append(f"- {reason}")
+    else:
+        lines.append("- No confidence reasoning was recorded.")
+
+    special_domain = evidence_block.get("special_domain_evidence")
+    if special_domain:
+        lines += [
+            "",
+            "## Specific domain evidence",
+            "",
+            f"- Label: {special_domain.get('label')}",
+            f"- Tool: {special_domain.get('tool')}",
+            f"- Hit: {special_domain.get('hit_name')}",
+            f"- Accession: {special_domain.get('accession')}",
+            f"- Coordinates: {special_domain.get('start')}–{special_domain.get('end')}",
+            f"- E-value: {special_domain.get('evalue')}",
+            f"- Score: {special_domain.get('score')}",
+        ]
+
+    lines += [
+        "",
+        "## Matched keywords and terms",
         "",
     ]
 
