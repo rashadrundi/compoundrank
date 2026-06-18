@@ -37,6 +37,21 @@ def build_parser() -> argparse.ArgumentParser:
         help='Repeatable NAME=SMILES value',
     )
     parser.add_argument("--ligand-manifest", default=None)
+    parser.add_argument(
+        "--auto-retrieve-ligands",
+        action="store_true",
+        help=(
+            "Run CPU target evidence first, then Stage 4A compound retrieval, "
+            "then dock the generated ligand manifest. Requires --fasta."
+        ),
+    )
+    parser.add_argument("--auto-retrieve-max-candidates", type=int, default=6)
+    parser.add_argument(
+        "--auto-retrieve-no-fetch-structures",
+        action="store_true",
+        help="Run Stage 4A without PubChem structure fetching. Usually not suitable for docking.",
+    )
+    parser.add_argument("--auto-retrieve-pubchem-timeout-seconds", type=int, default=60)
 
     parser.add_argument(
         "--fasta",
@@ -150,38 +165,47 @@ def main(argv: list[str] | None = None) -> int:
             create=True,
         )
 
-    manifest_requests = []
-    if args.ligand_manifest:
-        manifest_path = require_absolute_external_file(
-            args.ligand_manifest,
-            "Ligand manifest",
-        )
-        manifest_requests = read_manifest(manifest_path)
+    if args.auto_retrieve_ligands:
+        if args.fasta is None:
+            raise ValueError("--auto-retrieve-ligands requires --fasta")
+        if args.ligand_manifest or args.ligand_file or args.ligand_cid or args.ligand_smiles:
+            raise ValueError(
+                "--auto-retrieve-ligands should not be combined with manual ligand inputs"
+            )
+        requests = []
+    else:
+        manifest_requests = []
+        if args.ligand_manifest:
+            manifest_path = require_absolute_external_file(
+                args.ligand_manifest,
+                "Ligand manifest",
+            )
+            manifest_requests = read_manifest(manifest_path)
 
-    # Validate file ligand paths as external before passing them onward.
-    ligand_files = [
-        str(require_absolute_external_file(value, "Ligand file"))
-        for value in args.ligand_file
-    ]
-    requests = combine_requests(
-        ligand_files,
-        args.ligand_cid,
-        args.ligand_smiles,
-        manifest_requests,
-    )
-    normalized_requests = []
-    for request in requests:
-        if request.source_type == "file":
-            external_path = require_absolute_external_file(
-                request.value,
-                f"Ligand file ({request.name})",
-            )
-            normalized_requests.append(
-                type(request)(request.name, request.source_type, str(external_path))
-            )
-        else:
-            normalized_requests.append(request)
-    requests = normalized_requests
+        # Validate file ligand paths as external before passing them onward.
+        ligand_files = [
+            str(require_absolute_external_file(value, "Ligand file"))
+            for value in args.ligand_file
+        ]
+        requests = combine_requests(
+            ligand_files,
+            args.ligand_cid,
+            args.ligand_smiles,
+            manifest_requests,
+        )
+        normalized_requests = []
+        for request in requests:
+            if request.source_type == "file":
+                external_path = require_absolute_external_file(
+                    request.value,
+                    f"Ligand file ({request.name})",
+                )
+                normalized_requests.append(
+                    type(request)(request.name, request.source_type, str(external_path))
+                )
+            else:
+                normalized_requests.append(request)
+        requests = normalized_requests
 
     autobox_ligand = None
     if args.autobox_ligand:
@@ -220,6 +244,10 @@ def main(argv: list[str] | None = None) -> int:
         fasta_path=args.fasta,
         homolog_api_url=args.homolog_api_url,
         homolog_timeout_seconds=args.homolog_timeout_seconds,
+        auto_retrieve_ligands=args.auto_retrieve_ligands,
+        auto_retrieve_max_candidates=args.auto_retrieve_max_candidates,
+        auto_retrieve_fetch_structures=not args.auto_retrieve_no_fetch_structures,
+        auto_retrieve_pubchem_timeout_seconds=args.auto_retrieve_pubchem_timeout_seconds,
         seeds=args.seeds,
         center_x=center_x,
         center_y=center_y,

@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Iterable
 
 from .clustering import cluster_pose_hypotheses
+from .compound_retrieval import run_compound_retrieval
 from .export import write_complex_pdb
 from .gnina import run_gnina_ensemble
 from .homolog_search import DEFAULT_API_URL, run_homolog_search
 from .interactions import summarize_interactions
-from .ligand import LigandRequest, prepare_ligand
+from .ligand import LigandRequest, prepare_ligand, read_manifest
 from .models import LigandResult
 from .pocket import build_pocket_definitions
 from .receptor import prepare_receptor
@@ -79,12 +80,26 @@ def run_pipeline(
     fasta_path: Path | None = None,
     homolog_api_url: str = DEFAULT_API_URL,
     homolog_timeout_seconds: int = 7200,
+    auto_retrieve_ligands: bool = False,
+    auto_retrieve_max_candidates: int = 20,
+    auto_retrieve_fetch_structures: bool = True,
+    auto_retrieve_pubchem_timeout_seconds: int = 60,
 ) -> list[Path]:
     cache_root = data_root / "cache"
     work_root = data_root / "work"
 
     cache_root.mkdir(parents=True, exist_ok=True)
     work_root.mkdir(parents=True, exist_ok=True)
+
+    ligand_requests = list(ligand_requests)
+
+    if auto_retrieve_ligands:
+        if fasta_path is None:
+            raise ValueError("--auto-retrieve-ligands requires --fasta")
+        if ligand_requests:
+            raise ValueError(
+                "--auto-retrieve-ligands should not be combined with manual ligand inputs"
+            )
 
     if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
         raise FileExistsError(
@@ -102,7 +117,51 @@ def run_pipeline(
     homology_executor: ThreadPoolExecutor | None = None
     homology_future = None
 
-    if fasta_path is not None:
+    if fasta_path is not None and auto_retrieve_ligands:
+        print(f"[HOMOLOGY] Running CPU homolog search before ligand retrieval: {fasta_path}")
+        homology_result = run_homolog_search(
+            fasta_path=Path(fasta_path),
+            output_dir=output_dir,
+            api_url=homolog_api_url,
+            timeout_seconds=homolog_timeout_seconds,
+        )
+
+        if homology_result.get("status") != "ok":
+            raise RuntimeError(
+                "Auto ligand retrieval requires successful target evidence. "
+                f"Homology error: {homology_result.get('error')}"
+            )
+
+        target_evidence_output = homology_result.get("target_evidence")
+        if not target_evidence_output:
+            raise RuntimeError("Homology completed but did not return target_evidence path")
+
+        homolog_summary_output = homology_result.get("summary_output")
+        retrieval_dir = output_dir / "stage4a_compound_retrieval"
+
+        print(f"[COMPOUND_RETRIEVAL] Running Stage 4A into: {retrieval_dir}")
+        retrieval_outputs = run_compound_retrieval(
+            target_evidence_path=Path(target_evidence_output),
+            homolog_summary_path=Path(homolog_summary_output) if homolog_summary_output else None,
+            output_dir=retrieval_dir,
+            max_candidates=auto_retrieve_max_candidates,
+            fetch_structures=auto_retrieve_fetch_structures,
+            pubchem_timeout_seconds=auto_retrieve_pubchem_timeout_seconds,
+        )
+
+        generated_manifest = retrieval_outputs["docking_manifest"]
+        ligand_requests = read_manifest(generated_manifest)
+
+        if not ligand_requests:
+            raise RuntimeError(
+                "Auto ligand retrieval produced no dockable ligand requests. "
+                f"Check {generated_manifest}"
+            )
+
+        print(f"[COMPOUND_RETRIEVAL] Docking manifest: {generated_manifest}")
+        print(f"[COMPOUND_RETRIEVAL] Dockable ligands: {len(ligand_requests)}")
+
+    elif fasta_path is not None:
         print(f"[HOMOLOGY] Starting CPU homolog search in background: {fasta_path}")
         homology_executor = ThreadPoolExecutor(
             max_workers=1,
