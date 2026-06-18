@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -66,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--size-x", type=float)
     parser.add_argument("--size-y", type=float)
     parser.add_argument("--size-z", type=float)
+    parser.add_argument("--box-json", default=None, help="Path to a reference_box.json file containing center_x/center_y/center_z/size_x/size_y/size_z.")
     parser.add_argument("--autobox-ligand", default=None)
     parser.add_argument("--fpocket-padding", type=float, default=4.0)
     parser.add_argument("--fpocket-pocket", type=int, default=None)
@@ -108,6 +110,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
+
+
+
+def load_box_json(path):
+    """Load explicit docking box values from a reference_box.json-style file."""
+    box_path = Path(path).expanduser()
+    if not box_path.exists():
+        raise FileNotFoundError(f"Box JSON not found: {box_path}")
+
+    with box_path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    required = ("center_x", "center_y", "center_z", "size_x", "size_y", "size_z")
+    missing = [key for key in required if key not in data]
+    if missing:
+        raise ValueError(f"Box JSON missing required keys: {', '.join(missing)}")
+
+    return {key: float(data[key]) for key in required}
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
@@ -170,6 +190,28 @@ def main(argv: list[str] | None = None) -> int:
             "Autobox ligand",
         )
 
+    center_x = args.center_x
+    center_y = args.center_y
+    center_z = args.center_z
+    size_x = args.size_x
+    size_y = args.size_y
+    size_z = args.size_z
+
+    if args.box_json:
+        if autobox_ligand is not None:
+            raise ValueError("Use either --box-json or --autobox-ligand, not both.")
+        explicit_cli_box_values = (center_x, center_y, center_z, size_x, size_y, size_z)
+        if any(value is not None for value in explicit_cli_box_values):
+            raise ValueError("Use either --box-json or explicit --center/--size values, not both.")
+
+        box_values = load_box_json(args.box_json)
+        center_x = box_values["center_x"]
+        center_y = box_values["center_y"]
+        center_z = box_values["center_z"]
+        size_x = box_values["size_x"]
+        size_y = box_values["size_y"]
+        size_z = box_values["size_z"]
+
     run_pipeline(
         receptor_pdb=receptor,
         ligand_requests=requests,
@@ -179,12 +221,12 @@ def main(argv: list[str] | None = None) -> int:
         homolog_api_url=args.homolog_api_url,
         homolog_timeout_seconds=args.homolog_timeout_seconds,
         seeds=args.seeds,
-        center_x=args.center_x,
-        center_y=args.center_y,
-        center_z=args.center_z,
-        size_x=args.size_x,
-        size_y=args.size_y,
-        size_z=args.size_z,
+        center_x=center_x,
+        center_y=center_y,
+        center_z=center_z,
+        size_x=size_x,
+        size_y=size_y,
+        size_z=size_z,
         autobox_ligand=autobox_ligand,
         fpocket_padding=args.fpocket_padding,
         fpocket_pocket=args.fpocket_pocket,
