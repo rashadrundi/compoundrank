@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
 from pathlib import Path
@@ -40,6 +41,49 @@ def _output_name(
             f"hypothesis_{hypothesis_rank:02d}.pdb"
         )
     return f"{compound_rank:02d}__{ligand_name}__hypothesis_{hypothesis_rank:02d}.pdb"
+
+
+
+def _best_cnn_score_text(records: list[object]) -> str:
+    scores: list[float] = []
+
+    for record in records:
+        value = getattr(record, "cnn_score", None)
+        if isinstance(value, (int, float)):
+            scores.append(float(value))
+
+    if not scores:
+        return ""
+
+    return f"{max(scores):.9f}"
+
+
+def _write_docking_attempt_summary(
+    output_dir: Path,
+    rows: list[dict[str, object]],
+) -> Path | None:
+    if not rows:
+        return None
+
+    output_path = output_dir / "docking_attempt_summary.csv"
+    fieldnames = [
+        "compound",
+        "pocket",
+        "raw_poses",
+        "accepted_poses",
+        "rejected_poses",
+        "status",
+        "best_raw_cnn_score",
+        "best_accepted_cnn_score",
+    ]
+
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+    return output_path
 
 
 def run_pipeline(
@@ -214,6 +258,7 @@ def run_pipeline(
             print(f"[POCKET] {pocket.pocket_id}: {pocket.source or pocket.mode}")
 
         ligand_results: list[LigandResult] = []
+        docking_attempt_rows: list[dict[str, object]] = []
 
         for request in ligand_requests:
             print(f"\n[LIGAND] Preparing {request.name}")
@@ -274,6 +319,19 @@ def run_pipeline(
                     f"[VALIDITY] {ligand.name} {pocket.pocket_id}: "
                     f"accepted {len(valid_records)}/{len(raw_records)}; "
                     f"rejected {len(failures)}"
+                )
+
+                docking_attempt_rows.append(
+                    {
+                        "compound": ligand.name,
+                        "pocket": pocket.pocket_id,
+                        "raw_poses": len(raw_records),
+                        "accepted_poses": len(valid_records),
+                        "rejected_poses": len(failures),
+                        "status": "accepted" if valid_records else "failed_posebusters",
+                        "best_raw_cnn_score": _best_cnn_score_text(raw_records),
+                        "best_accepted_cnn_score": _best_cnn_score_text(valid_records),
+                    }
                 )
 
             print(f"[VALIDITY] Failure records: {total_failures}")
@@ -350,6 +408,13 @@ def run_pipeline(
         print("\nFinal PDB files:")
         for path in written:
             print(path)
+
+        attempt_summary_path = _write_docking_attempt_summary(
+            output_dir,
+            docking_attempt_rows,
+        )
+        if attempt_summary_path is not None:
+            print(f"[REPORT] Docking attempt summary: {attempt_summary_path}")
 
         if homology_future is not None:
             print("\n[HOMOLOGY] Waiting for CPU homolog search to finish")

@@ -405,6 +405,78 @@ def _render_docking_section(hypotheses: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+
+def _render_docking_attempt_summary_section(output_dir: Path) -> list[str]:
+    summary_csv = output_dir / "docking_attempt_summary.csv"
+    rows = _read_candidate_csv(summary_csv)
+
+    if not rows:
+        return []
+
+    lines = [
+        "## Docking Attempt Summary",
+        "",
+        f"- Attempt summary table: `{_relative_or_original(output_dir, summary_csv)}`",
+        "",
+        "| Compound | Pocket | Raw poses | Accepted | Rejected | Status | Best raw CNN | Best accepted CNN |",
+        "|---|---|---:|---:|---:|---|---:|---:|",
+    ]
+
+    def _as_int(row: dict[str, str], key: str) -> int:
+        try:
+            return int(str(row.get(key, "0")))
+        except ValueError:
+            return 0
+
+    failed_rows: list[dict[str, str]] = []
+
+    for row in rows:
+        accepted = _as_int(row, "accepted_poses")
+        if accepted == 0 or str(row.get("status", "")) != "accepted":
+            failed_rows.append(row)
+
+        lines.append(
+            "| "
+            f"{_format_value(row.get('compound'))} | "
+            f"{_format_value(row.get('pocket'))} | "
+            f"{_format_value(row.get('raw_poses'))} | "
+            f"{_format_value(row.get('accepted_poses'))} | "
+            f"{_format_value(row.get('rejected_poses'))} | "
+            f"{_format_value(row.get('status'))} | "
+            f"{_format_value(row.get('best_raw_cnn_score'))} | "
+            f"{_format_value(row.get('best_accepted_cnn_score'))} |"
+        )
+
+    lines.append("")
+
+    if failed_rows:
+        lines += [
+            "### Attempted Ligands With No Accepted Final Pose",
+            "",
+            "| Compound | Pocket | Raw poses | Accepted | Rejected | Status | Best raw CNN |",
+            "|---|---|---:|---:|---:|---|---:|",
+        ]
+
+        for row in failed_rows:
+            lines.append(
+                "| "
+                f"{_format_value(row.get('compound'))} | "
+                f"{_format_value(row.get('pocket'))} | "
+                f"{_format_value(row.get('raw_poses'))} | "
+                f"{_format_value(row.get('accepted_poses'))} | "
+                f"{_format_value(row.get('rejected_poses'))} | "
+                f"{_format_value(row.get('status'))} | "
+                f"{_format_value(row.get('best_raw_cnn_score'))} |"
+            )
+
+        lines += [
+            "",
+            "These ligands were attempted but did not produce a final PoseBusters-accepted hypothesis file.",
+            "",
+        ]
+
+    return lines
+
 def render_run_report(
     *,
     output_dir: Path,
@@ -421,6 +493,7 @@ def render_run_report(
     lines.extend(_render_target_section(target_evidence))
     lines.extend(_render_ligand_retrieval_section(output_dir))
     lines.extend(_render_docking_section(hypotheses))
+    lines.extend(_render_docking_attempt_summary_section(output_dir))
 
     lines += [
         "## Interpretation Limits",
