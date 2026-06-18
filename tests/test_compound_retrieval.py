@@ -81,6 +81,34 @@ class CompoundRetrievalTests(unittest.TestCase):
             self.assertIn("retroviral_aspartyl_protease", report)
             self.assertIn("darunavir", report)
 
+    def test_docking_manifest_uses_main_pipeline_schema(self):
+        import tempfile
+        from pathlib import Path
+
+        from compoundrank.compound_retrieval import write_docking_manifest
+
+        candidate = {
+            "compound_name": "darunavir",
+            "local_sdf_path": "/tmp/darunavir.sdf",
+            "selected_for_docking": True,
+            "retrieval_reason": "test reason",
+            "evidence_level": "strong",
+            "design_status": "known_inhibitor",
+            "pubchem_cid": "213039",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "docking_manifest.csv"
+            write_docking_manifest(output, [candidate])
+
+            text = output.read_text(encoding="utf-8")
+            first_line = text.splitlines()[0]
+            self.assertEqual(
+                first_line,
+                "name,source_type,value,retrieval_reason,evidence_level,design_status,pubchem_cid",
+            )
+            self.assertIn("darunavir,file,/tmp/darunavir.sdf", text)
+
 
 if __name__ == "__main__":
     unittest.main()

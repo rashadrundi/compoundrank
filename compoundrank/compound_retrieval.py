@@ -444,15 +444,23 @@ def write_candidate_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
 
 
 def write_docking_manifest(path: Path, candidates: list[dict[str, Any]]) -> None:
-    """Write a ligand manifest compatible with the current ligand prep path flow.
+    """Write a ligand manifest compatible with the main CompoundRank pipeline.
 
-    Only candidates with fetched local SDF paths are included.
+    The existing ligand loader requires:
+        name, source_type, value
+
+    For PubChem-fetched Stage 4A ligands:
+        source_type = file
+        value = local SDF path
+
+    Extra metadata columns are preserved for traceability.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
     fields = [
         "name",
-        "path",
+        "source_type",
+        "value",
         "retrieval_reason",
         "evidence_level",
         "design_status",
@@ -472,7 +480,8 @@ def write_docking_manifest(path: Path, candidates: list[dict[str, Any]]) -> None
             writer.writerow(
                 {
                     "name": candidate.get("compound_name"),
-                    "path": local_sdf_path,
+                    "source_type": "file",
+                    "value": local_sdf_path,
                     "retrieval_reason": candidate.get("retrieval_reason"),
                     "evidence_level": candidate.get("evidence_level"),
                     "design_status": candidate.get("design_status"),
