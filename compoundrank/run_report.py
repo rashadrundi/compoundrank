@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 from pathlib import Path
@@ -208,6 +209,132 @@ def _render_target_section(target_evidence: dict[str, Any] | None) -> list[str]:
     return lines
 
 
+
+def _relative_or_original(output_dir: Path, value: Any) -> str:
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    path = Path(text)
+    try:
+        return str(path.relative_to(output_dir))
+    except ValueError:
+        return text
+
+
+def _read_candidate_csv(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        return [dict(row) for row in reader]
+
+
+def _render_ligand_retrieval_section(output_dir: Path) -> list[str]:
+    stage4a_dir = output_dir / "stage4a_compound_retrieval"
+    candidate_csv = stage4a_dir / "candidate_ligands.csv"
+    docking_manifest = stage4a_dir / "docking_manifest.csv"
+    ligand_report = stage4a_dir / "ligand_search_report.md"
+
+    candidates = _read_candidate_csv(candidate_csv)
+
+    if not candidates and not stage4a_dir.exists():
+        return []
+
+    lines = [
+        "## Stage 4A Ligand Retrieval",
+        "",
+    ]
+
+    if not candidates:
+        lines += [
+            "Stage 4A output directory was found, but no candidate ligand CSV was available.",
+            "",
+        ]
+        return lines
+
+    lines += [
+        f"- Candidate table: `{_relative_or_original(output_dir, candidate_csv)}`",
+        f"- Docking manifest: `{_relative_or_original(output_dir, docking_manifest)}`" if docking_manifest.exists() else "- Docking manifest: unavailable",
+        f"- Ligand search report: `{_relative_or_original(output_dir, ligand_report)}`" if ligand_report.exists() else "- Ligand search report: unavailable",
+        f"- Retrieved candidate count: {len(candidates)}",
+        "",
+        "| Retrieval rank | Compound | Design status | Evidence | Rule | PubChem CID | Structure status |",
+        "|---:|---|---|---|---|---|---|",
+    ]
+
+    def _rank_value(row: dict[str, str]) -> int:
+        try:
+            return int(str(row.get("retrieval_rank", "9999")))
+        except ValueError:
+            return 9999
+
+    candidates = sorted(candidates, key=_rank_value)
+
+    for row in candidates:
+        lines.append(
+            "| "
+            f"{_format_value(row.get('retrieval_rank'))} | "
+            f"{_format_value(row.get('compound_name'))} | "
+            f"{_format_value(row.get('design_status'))} | "
+            f"{_format_value(row.get('evidence_level'))} | "
+            f"{_format_value(row.get('retrieval_rule_id'))} | "
+            f"{_format_value(row.get('pubchem_cid'))} | "
+            f"{_format_value(row.get('structure_fetch_status'))} |"
+        )
+
+    lines += [
+        "",
+        "### Retrieval Basis",
+        "",
+    ]
+
+    seen_basis: set[tuple[str, str, str, str]] = set()
+    for row in candidates:
+        basis = (
+            str(row.get("retrieval_rule_id", "")),
+            str(row.get("target_family_basis", "")),
+            str(row.get("special_domain_label", "")),
+            str(row.get("special_domain_accession", "")),
+        )
+        if basis in seen_basis:
+            continue
+        seen_basis.add(basis)
+
+        rule, family, label, accession = basis
+        lines += [
+            f"- Rule: `{_format_value(rule)}`",
+            f"  - Target family basis: {_format_value(family)}",
+            f"  - Special domain: {_format_value(label)} ({_format_value(accession)})",
+        ]
+
+    lines += [
+        "",
+        "### Candidate Reasoning",
+        "",
+    ]
+
+    for row in candidates[:10]:
+        lines += [
+            f"#### {_format_value(row.get('compound_name'))}",
+            "",
+            f"- Retrieval reason: {_format_value(row.get('retrieval_reason'))}",
+            f"- Local SDF: `{_relative_or_original(output_dir, row.get('local_sdf_path'))}`",
+            "",
+        ]
+
+    if len(candidates) > 10:
+        lines += [
+            f"_Only the first 10 candidates are shown here. See `{_relative_or_original(output_dir, candidate_csv)}` for the full table._",
+            "",
+        ]
+
+    return lines
+
 def _render_docking_section(hypotheses: list[dict[str, Any]]) -> list[str]:
     lines = [
         "## Docking Hypotheses",
@@ -292,6 +419,7 @@ def render_run_report(
     ]
 
     lines.extend(_render_target_section(target_evidence))
+    lines.extend(_render_ligand_retrieval_section(output_dir))
     lines.extend(_render_docking_section(hypotheses))
 
     lines += [
