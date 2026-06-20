@@ -9,30 +9,24 @@ from typing import Any
 TARGET_RULES = [
     {
         "target_class": "viral protease",
-        "enzyme_class": "aspartyl protease",
+        "enzyme_class": None,
         "keywords": [
             "protease",
             "peptidase",
-            "aspartyl",
-            "aspartic",
-            "retropepsin",
-            "hiv protease",
             "proteinase",
         ],
         "recommended_compound_classes": [
             "viral protease inhibitors",
-            "HIV protease inhibitors",
-            "aspartyl protease inhibitors",
         ],
         "ligand_database_query_terms": [
-            "HIV protease inhibitor",
-            "viral aspartyl protease inhibitor",
-            "protease inhibitor antiviral",
+            "viral protease inhibitor",
+            "antiviral protease inhibitor",
         ],
         "docking_priority": "high",
         "notes": [
             "Proteases are common antiviral drug targets.",
-            "For HIV-like aspartyl proteases, catalytic aspartate and flap-region contacts are biologically important.",
+            "Generic protease wording does not establish an aspartyl, cysteine, serine, or metalloprotease subclass.",
+            "Catalytic subclass and family-specific ligand transfer require specific annotation or sequence evidence.",
         ],
     },
     {
@@ -179,20 +173,104 @@ TARGET_RULES = [
 
 SPECIAL_DOMAIN_RULES = [
     {
-        "match_names": ["RVP"],
-        "match_accessions": ["pfam00077", "PF00077"],
+        "match_names": [
+            "RVP",
+        ],
+        "match_accessions": [
+            "pfam00077",
+            "PF00077",
+        ],
+        "match_terms": [
+            "retroviral aspartyl protease",
+            "retroviral protease domain",
+            "retropepsin",
+        ],
         "label": "Retroviral aspartyl protease domain",
         "target_name": "HIV-like retroviral aspartyl protease",
         "target_class": "viral protease",
         "enzyme_class": "aspartyl protease",
         "viral_family": "Retroviridae-like / retroviral",
-        "matched_terms": ["RVP", "pfam00077", "retroviral protease domain"],
+        "matched_terms": [
+            "RVP",
+            "pfam00077",
+            "retroviral protease domain",
+        ],
+        "recommended_compound_classes": [
+            "viral protease inhibitors",
+            "HIV protease inhibitors",
+            "aspartyl protease inhibitors",
+        ],
+        "ligand_database_query_terms": [
+            "HIV protease inhibitor",
+            "viral aspartyl protease inhibitor",
+            "retroviral protease inhibitor",
+        ],
+        "docking_priority": "high",
+        "notes": [
+            "Catalytic aspartate and flap-region contacts are important for retroviral aspartyl proteases.",
+        ],
         "confidence": "high",
         "confidence_reason": (
-            "Specific CDD/Pfam retroviral protease domain evidence was detected. "
-            "This is stronger than generic keyword matching."
+            "Specific CDD/Pfam retroviral protease domain evidence "
+            "was detected. This is stronger than generic protease "
+            "keyword matching."
         ),
-    }
+    },
+    {
+        "match_names": [
+            "3C-like protease",
+            "3CLpro",
+            "Mpro",
+            "Peptidase C30",
+            "Peptidase_C30",
+            "main protease",
+            "main proteinase",
+        ],
+        "match_accessions": [],
+        "match_terms": [
+            "3c-like protease",
+            "3cl protease",
+            "3clpro",
+            "coronavirus main protease",
+            "coronavirus main proteinase",
+            "peptidase c30",
+            "peptidase_c30",
+            "coronavirus endopeptidase",
+            "coronavirus polyprotein-processing protease",
+        ],
+        "label": "Coronavirus 3C-like main protease domain",
+        "target_name": "coronavirus 3C-like main protease",
+        "target_class": "viral protease",
+        "enzyme_class": "cysteine protease",
+        "viral_family": "Coronaviridae-like / coronavirus",
+        "matched_terms": [
+            "3C-like protease",
+            "3CLpro",
+            "main protease",
+            "peptidase C30",
+        ],
+        "recommended_compound_classes": [
+            "coronavirus main protease inhibitors",
+            "viral cysteine protease inhibitors",
+            "3CLpro inhibitors",
+        ],
+        "ligand_database_query_terms": [
+            "coronavirus main protease inhibitor",
+            "SARS-CoV-2 Mpro inhibitor",
+            "3CLpro inhibitor",
+            "peptidase C30 inhibitor",
+        ],
+        "docking_priority": "high",
+        "notes": [
+            "Coronavirus 3C-like proteases use a catalytic cysteine-histidine dyad.",
+            "Covalent and noncovalent inhibitors should be distinguished during docking interpretation.",
+        ],
+        "confidence": "high",
+        "confidence_reason": (
+            "Specific coronavirus 3C-like protease or peptidase "
+            "C30 annotation evidence was detected."
+        ),
+    },
 ]
 
 
@@ -290,8 +368,11 @@ def _score_rules(search_text: str) -> list[dict[str, Any]]:
     return scored
 
 
-def _detect_special_domain(summary: dict[str, Any]) -> dict[str, Any] | None:
+def _detect_special_domain(
+    summary: dict[str, Any],
+) -> dict[str, Any] | None:
     rows = summary.get("rows", {})
+
     if not isinstance(rows, dict):
         return None
 
@@ -303,36 +384,122 @@ def _detect_special_domain(summary: dict[str, Any]) -> dict[str, Any] | None:
             if not isinstance(row, dict):
                 continue
 
-            row_name = str(row.get("name", "")).strip()
-            row_accession = str(row.get("accession", "")).strip()
-            row_text = _flatten_text(row).lower()
+            row_name = str(
+                row.get("name")
+                or row.get("signature_desc")
+                or row.get("description")
+                or ""
+            ).strip()
+
+            row_accession = str(
+                row.get("accession")
+                or row.get("signature_accession")
+                or row.get("interpro_accession")
+                or ""
+            ).strip()
+
+            row_text = _flatten_text(row).casefold()
 
             for rule in SPECIAL_DOMAIN_RULES:
-                name_match = row_name in rule["match_names"]
-                accession_match = row_accession in rule["match_accessions"]
-                text_match = any(
-                    term.lower() in row_text
-                    for term in rule["match_names"] + rule["match_accessions"]
+                match_names = [
+                    str(value)
+                    for value in rule.get(
+                        "match_names",
+                        [],
+                    )
+                ]
+                match_accessions = [
+                    str(value)
+                    for value in rule.get(
+                        "match_accessions",
+                        [],
+                    )
+                ]
+                match_terms = [
+                    str(value)
+                    for value in rule.get(
+                        "match_terms",
+                        [],
+                    )
+                ]
+
+                name_match = any(
+                    row_name.casefold()
+                    == value.casefold()
+                    for value in match_names
                 )
 
-                if name_match or accession_match or text_match:
-                    return {
-                        "label": rule["label"],
-                        "tool": tool_name,
-                        "hit_name": row_name,
-                        "accession": row_accession,
-                        "start": row.get("start"),
-                        "end": row.get("end"),
-                        "evalue": row.get("evalue"),
-                        "score": row.get("score"),
-                        "target_name": rule["target_name"],
-                        "target_class": rule["target_class"],
-                        "enzyme_class": rule["enzyme_class"],
-                        "viral_family": rule["viral_family"],
-                        "matched_terms": rule["matched_terms"],
-                        "confidence": rule["confidence"],
-                        "confidence_reason": rule["confidence_reason"],
-                    }
+                accession_match = any(
+                    row_accession.casefold()
+                    == value.casefold()
+                    for value in match_accessions
+                )
+
+                text_match = any(
+                    value.casefold() in row_text
+                    for value in (
+                        match_names
+                        + match_accessions
+                        + match_terms
+                    )
+                    if value
+                )
+
+                if not (
+                    name_match
+                    or accession_match
+                    or text_match
+                ):
+                    continue
+
+                return {
+                    "label": rule["label"],
+                    "tool": tool_name,
+                    "hit_name": (
+                        row_name
+                        or _row_label(row)
+                    ),
+                    "accession": row_accession,
+                    "start": row.get("start"),
+                    "end": row.get("end"),
+                    "evalue": row.get("evalue"),
+                    "score": row.get("score"),
+                    "target_name": rule[
+                        "target_name"
+                    ],
+                    "target_class": rule[
+                        "target_class"
+                    ],
+                    "enzyme_class": rule[
+                        "enzyme_class"
+                    ],
+                    "viral_family": rule[
+                        "viral_family"
+                    ],
+                    "matched_terms": rule[
+                        "matched_terms"
+                    ],
+                    "recommended_compound_classes": (
+                        rule[
+                            "recommended_compound_classes"
+                        ]
+                    ),
+                    "ligand_database_query_terms": (
+                        rule[
+                            "ligand_database_query_terms"
+                        ]
+                    ),
+                    "docking_priority": rule[
+                        "docking_priority"
+                    ],
+                    "notes": rule["notes"],
+                    "confidence": rule[
+                        "confidence"
+                    ],
+                    "confidence_reason": rule[
+                        "confidence_reason"
+                    ],
+                }
 
     return None
 
@@ -445,106 +612,197 @@ def build_target_evidence(
     hits = _collect_hits(summary)
     search_text = _flatten_text(summary)
     scored_rules = _score_rules(search_text)
-    best = scored_rules[0] if scored_rules else {"score": 0, "rule": None, "matched_keywords": []}
-    special_domain = _detect_special_domain(summary)
 
-    if best["score"] <= 0 and special_domain is None:
-        evidence = _default_unknown_evidence(summary, hits)
-    else:
-        rule = best["rule"]
+    best = (
+        scored_rules[0]
+        if scored_rules
+        else {
+            "score": 0,
+            "rule": None,
+            "matched_keywords": [],
+        }
+    )
 
-        if special_domain is not None:
-            for candidate_rule in TARGET_RULES:
-                if candidate_rule["target_class"] == special_domain["target_class"]:
-                    rule = candidate_rule
-                    break
+    best_score = int(
+        best.get("score") or 0
+    )
+    special_domain = _detect_special_domain(
+        summary
+    )
 
-        confidence = _confidence(
-            best["score"],
-            len(hits),
-            special_domain=special_domain,
+    if (
+        best_score <= 0
+        and special_domain is None
+    ):
+        return _default_unknown_evidence(
+            summary,
+            hits,
         )
 
-        if special_domain is not None:
-            target_name = str(special_domain["target_name"])
-            viral_family = str(special_domain["viral_family"])
-            predicted_function = (
-                f"Likely {special_domain['target_name']} based on specific domain evidence."
-            )
-        else:
-            target_name = rule["target_class"]
-            viral_family = "unknown"
-            if rule["target_class"] == "viral protease" and any(
-                keyword in search_text.lower()
-                for keyword in ("hiv", "retropepsin", "aspartyl", "aspartic")
-            ):
-                target_name = "HIV-like viral aspartyl protease"
+    if special_domain is not None:
+        interpretation_source = special_domain
 
-            predicted_function = (
-                f"Likely {rule['target_class']} based on annotation and homology keyword evidence."
+        target_name = str(
+            special_domain["target_name"]
+        )
+        target_class = str(
+            special_domain["target_class"]
+        )
+        enzyme_class = special_domain.get(
+            "enzyme_class"
+        )
+        viral_family = str(
+            special_domain["viral_family"]
+        )
+        docking_priority = str(
+            special_domain["docking_priority"]
+        )
+
+        predicted_function = (
+            f"Likely {target_name} based on "
+            "specific annotation-domain evidence."
+        )
+    else:
+        rule = best.get("rule")
+
+        if not isinstance(rule, dict):
+            return _default_unknown_evidence(
+                summary,
+                hits,
             )
 
-        evidence = {
-            "schema_version": "target_evidence.v0.1",
-            "source": {
-                "job_id": summary.get("job_id"),
-                "status": summary.get("status"),
-                "source_fasta": source_fasta,
-                "result_counts": summary.get("result_counts", {}),
-            },
-            "target_interpretation": {
-                "target_name": target_name,
-                "target_class": rule["target_class"],
-                "enzyme_class": rule["enzyme_class"],
-                "viral_family": viral_family,
-                "predicted_function": predicted_function,
-                "docking_priority": rule["docking_priority"],
-                "evidence_confidence": confidence,
-            },
-            "evidence": {
-                "matched_keywords": list(
-                    dict.fromkeys(
-                        list(best.get("matched_keywords", []))
-                        + (
-                            list(special_domain.get("matched_terms", []))
-                            if special_domain is not None
-                            else []
-                        )
+        interpretation_source = rule
+        target_name = str(
+            rule["target_class"]
+        )
+        target_class = str(
+            rule["target_class"]
+        )
+        enzyme_class = rule.get(
+            "enzyme_class"
+        )
+        viral_family = "unknown"
+        docking_priority = str(
+            rule["docking_priority"]
+        )
+
+        predicted_function = (
+            f"Likely {target_class} based on "
+            "annotation and homology keyword "
+            "evidence. Catalytic subclass remains "
+            "unresolved unless specific evidence "
+            "is present."
+        )
+
+    confidence = _confidence(
+        best_score,
+        len(hits),
+        special_domain=special_domain,
+    )
+
+    matched_keywords = list(
+        dict.fromkeys(
+            list(
+                best.get(
+                    "matched_keywords",
+                    [],
+                )
+            )
+            + (
+                list(
+                    special_domain.get(
+                        "matched_terms",
+                        [],
                     )
-                ),
-                "special_domain_evidence": special_domain,
-                "confidence_reasoning": _confidence_reasoning(
-                    confidence=confidence,
-                    best_score=best["score"],
-                    total_hits=len(hits),
-                    special_domain=special_domain,
-                    summary=summary,
-                ),
-                "supporting_hits": hits[:10],
-            },
-            "future_ligand_database_query": {
-                "recommended_compound_classes": rule["recommended_compound_classes"],
-                "query_terms": rule["ligand_database_query_terms"],
-                "status": "not_queried",
-                "notes": [
-                    "No ligand database query was performed in this stage.",
-                    "These query terms are intended for a future external ligand database service.",
-                ],
-            },
-            "active_site_or_motif_notes": rule["notes"],
-            "limitations": [
-                "This target evidence packet is generated from computational annotation only.",
-                "It does not prove target identity, binding, inhibition, or antiviral efficacy.",
-                "Docking should be interpreted as hypothesis generation, not validation.",
-                "Experimental validation and literature review remain required.",
-            ],
-            "recommended_next_action": (
-                "Use this target evidence to guide ligand database queries and docking setup, "
-                "then manually review whether docking contacts match biologically important regions."
-            ),
-        }
+                )
+                if special_domain is not None
+                else []
+            )
+        )
+    )
 
-    return evidence
+    return {
+        "schema_version": (
+            "target_evidence.v0.1"
+        ),
+        "source": {
+            "job_id": summary.get("job_id"),
+            "status": summary.get("status"),
+            "source_fasta": source_fasta,
+            "result_counts": summary.get(
+                "result_counts",
+                {},
+            ),
+        },
+        "target_interpretation": {
+            "target_name": target_name,
+            "target_class": target_class,
+            "enzyme_class": enzyme_class,
+            "viral_family": viral_family,
+            "predicted_function": (
+                predicted_function
+            ),
+            "docking_priority": (
+                docking_priority
+            ),
+            "evidence_confidence": (
+                confidence
+            ),
+        },
+        "evidence": {
+            "matched_keywords": (
+                matched_keywords
+            ),
+            "special_domain_evidence": (
+                special_domain
+            ),
+            "confidence_reasoning": (
+                _confidence_reasoning(
+                    confidence=confidence,
+                    best_score=best_score,
+                    total_hits=len(hits),
+                    special_domain=(
+                        special_domain
+                    ),
+                    summary=summary,
+                )
+            ),
+            "supporting_hits": hits[:10],
+        },
+        "future_ligand_database_query": {
+            "recommended_compound_classes": (
+                interpretation_source[
+                    "recommended_compound_classes"
+                ]
+            ),
+            "query_terms": (
+                interpretation_source[
+                    "ligand_database_query_terms"
+                ]
+            ),
+            "status": "not_queried",
+            "notes": [
+                "No ligand database query was performed in this stage.",
+                "These terms describe reference ligand-evidence searches; the submitted FASTA remains the docking target.",
+            ],
+        },
+        "active_site_or_motif_notes": (
+            interpretation_source["notes"]
+        ),
+        "limitations": [
+            "This target evidence packet is generated from computational annotation only.",
+            "It does not replace or redefine the submitted FASTA target.",
+            "It does not prove binding, inhibition, or antiviral efficacy.",
+            "Docking should be interpreted as hypothesis generation, not validation.",
+            "Experimental validation and literature review remain required.",
+        ],
+        "recommended_next_action": (
+            "Use annotation and sequence similarity "
+            "to retrieve transferable ligand evidence, "
+            "then dock candidates against the structure "
+            "generated from the submitted FASTA."
+        ),
+    }
 
 
 def write_target_evidence_outputs(
