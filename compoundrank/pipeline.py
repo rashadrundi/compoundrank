@@ -267,8 +267,11 @@ def run_pipeline(
             meeko_receptor_bin=meeko_receptor_bin,
         )
 
+        # Detect geometric pockets on the original protein coordinates.
+        # The protonated display structure is retained for validation/output,
+        # while GNINA uses the prepared PDBQT receptor.
         pockets = build_pocket_definitions(
-            receptor_pdb=receptor.display_pdb,
+            receptor_pdb=receptor.source_pdb,
             work_dir=work_dir / "pocket",
             explicit_values=(center_x, center_y, center_z, size_x, size_y, size_z),
             autobox_ligand=autobox_ligand,
