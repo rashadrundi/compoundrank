@@ -985,6 +985,34 @@ def _render_pose_recovery_section(
             "- Complete atom mapping policy: "
             f"{_format_value(summary.get('bond_order_mapping'))}"
         ),
+        (
+            "- Evaluated compound: "
+            f"{_format_value(summary.get('evaluated_compound'))}"
+        ),
+        (
+            "- Evaluated pocket: "
+            f"{_format_value(summary.get('evaluated_pocket_id'))}"
+        ),
+        (
+            "- Evaluation stage: "
+            f"{_format_value(summary.get('evaluation_stage'))}"
+        ),
+        (
+            "- Reference ligand used for post hoc RMSD evaluation: "
+            f"{yes_no_unknown(summary.get('reference_ligand_used_for_posthoc_evaluation'))}"
+        ),
+        (
+            "- Same reference file supplied as the GNINA autobox ligand: "
+            f"{yes_no_unknown(summary.get('reference_ligand_also_supplied_as_autobox_ligand'))}"
+        ),
+        (
+            "- Reference ligand used to define the docking box: "
+            f"{yes_no_unknown(summary.get('reference_ligand_used_for_box_definition'))}"
+        ),
+        (
+            "- Reference ligand used to choose among detected pockets: "
+            f"{yes_no_unknown(summary.get('reference_ligand_used_for_pocket_selection'))}"
+        ),
         "",
         "| Metric | Value |",
         "|---|---:|",

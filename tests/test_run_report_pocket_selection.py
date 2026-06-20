@@ -277,6 +277,21 @@ class RunReportPocketSelectionTests(
                     "cognate_pose_recovery_"
                     "and_ranking_pass"
                 ),
+                "evaluated_compound": (
+                    "ensitrelvir_prepared"
+                ),
+                "evaluated_pocket_id": (
+                    "autobox_01"
+                ),
+                "evaluation_stage": (
+                    "after normal GNINA scoring, "
+                    "PoseBusters filtering, and "
+                    "pocket selection"
+                ),
+                "reference_ligand_used_for_posthoc_evaluation": True,
+                "reference_ligand_also_supplied_as_autobox_ligand": True,
+                "reference_ligand_used_for_box_definition": True,
+                "reference_ligand_used_for_pocket_selection": False,
             }
 
             (
@@ -348,6 +363,42 @@ class RunReportPocketSelectionTests(
             )
             self.assertIn(
                 "Ranking pass | yes",
+                report,
+            )
+            self.assertIn(
+                "Evaluated compound: ensitrelvir_prepared",
+                report,
+            )
+            self.assertIn(
+                "Evaluated pocket: autobox_01",
+                report,
+            )
+            self.assertIn(
+                (
+                    "Reference ligand used for post hoc "
+                    "RMSD evaluation: yes"
+                ),
+                report,
+            )
+            self.assertIn(
+                (
+                    "Same reference file supplied as the "
+                    "GNINA autobox ligand: yes"
+                ),
+                report,
+            )
+            self.assertIn(
+                (
+                    "Reference ligand used to define the "
+                    "docking box: yes"
+                ),
+                report,
+            )
+            self.assertIn(
+                (
+                    "Reference ligand used to choose among "
+                    "detected pockets: no"
+                ),
                 report,
             )
             self.assertIn(

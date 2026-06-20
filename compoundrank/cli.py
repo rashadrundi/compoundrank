@@ -93,6 +93,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--size-z", type=float)
     parser.add_argument("--box-json", default=None, help="Path to a reference_box.json file containing center_x/center_y/center_z/size_x/size_y/size_z.")
     parser.add_argument("--autobox-ligand", default=None)
+    parser.add_argument(
+        "--reference-ligand",
+        default=None,
+        help=(
+            "Optional cognate reference-ligand SDF used only after "
+            "normal docking and pocket selection to calculate pose-recovery RMSD. "
+            "The reference ligand does not influence pocket detection, docking, "
+            "scoring, filtering, clustering, or selection."
+        ),
+    )
+    parser.add_argument(
+        "--pose-recovery-rmsd-threshold",
+        type=float,
+        default=2.0,
+        help=(
+            "Heavy-atom RMSD threshold in angstroms for an optional "
+            "cognate pose-recovery benchmark."
+        ),
+    )
     parser.add_argument("--fpocket-padding", type=float, default=4.0)
     parser.add_argument("--fpocket-pocket", type=int, default=None)
     parser.add_argument(
@@ -223,6 +242,26 @@ def main(argv: list[str] | None = None) -> int:
             "Autobox ligand",
         )
 
+    reference_ligand = None
+    if args.reference_ligand:
+        reference_ligand = require_absolute_external_file(
+            args.reference_ligand,
+            "Reference ligand",
+        )
+
+        if reference_ligand.suffix.lower() not in {
+            ".sdf",
+            ".sd",
+        }:
+            raise ValueError(
+                "--reference-ligand must be an SDF file"
+            )
+
+    if args.pose_recovery_rmsd_threshold <= 0:
+        raise ValueError(
+            "--pose-recovery-rmsd-threshold must be greater than zero"
+        )
+
     center_x = args.center_x
     center_y = args.center_y
     center_z = args.center_z
@@ -266,6 +305,10 @@ def main(argv: list[str] | None = None) -> int:
         size_y=size_y,
         size_z=size_z,
         autobox_ligand=autobox_ligand,
+        reference_ligand=reference_ligand,
+        pose_recovery_rmsd_threshold=(
+            args.pose_recovery_rmsd_threshold
+        ),
         fpocket_padding=args.fpocket_padding,
         fpocket_pocket=args.fpocket_pocket,
         fpocket_top_n=args.fpocket_top_n,

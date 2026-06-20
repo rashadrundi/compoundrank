@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 from typing import Iterable
 
+from rdkit import Chem
+
 from .clustering import cluster_pose_hypotheses
 from .compound_retrieval import run_compound_retrieval
 from .export import write_complex_pdb
@@ -13,7 +15,7 @@ from .gnina import run_gnina_ensemble
 from .homolog_search import DEFAULT_API_URL, run_homolog_search
 from .interactions import summarize_interactions
 from .ligand import LigandRequest, prepare_ligand, read_manifest
-from .models import LigandResult
+from .models import LigandResult, PoseRecord
 from .pocket import (
     build_pocket_definitions,
     write_pocket_definitions,
@@ -22,6 +24,10 @@ from .pocket_selection import (
     rank_pocket_attempts,
     summarize_pocket_attempt,
     write_pocket_selection_summary,
+)
+from .pose_recovery import (
+    evaluate_scored_pose_sdf,
+    write_scored_pose_outputs,
 )
 from .receptor import prepare_receptor
 from .uncertainty import assess_uncertainty
@@ -94,6 +100,177 @@ def _write_docking_attempt_summary(
     return output_path
 
 
+
+def _write_pose_records_sdf(
+    records: list[PoseRecord],
+    output_path: Path,
+) -> Path:
+    """Persist selected-pocket poses outside the temporary work tree."""
+    if not records:
+        raise ValueError(
+            "No selected-pocket pose records were supplied."
+        )
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    writer = Chem.SDWriter(str(output_path))
+    written = 0
+
+    try:
+        for record in records:
+            molecule = Chem.Mol(record.molecule)
+
+            molecule.SetProp(
+                "_Name",
+                (
+                    f"{record.ligand_name}_"
+                    f"{record.pocket_id}_"
+                    f"seed_{record.seed}_"
+                    f"pose_{record.pose_number}"
+                ),
+            )
+
+            if record.cnn_score is not None:
+                molecule.SetDoubleProp(
+                    "CNNscore",
+                    float(record.cnn_score),
+                )
+
+            if record.cnn_affinity is not None:
+                molecule.SetDoubleProp(
+                    "CNNaffinity",
+                    float(record.cnn_affinity),
+                )
+
+            if record.minimized_affinity is not None:
+                molecule.SetDoubleProp(
+                    "minimizedAffinity",
+                    float(record.minimized_affinity),
+                )
+
+            molecule.SetIntProp(
+                "seed",
+                int(record.seed),
+            )
+            molecule.SetIntProp(
+                "pose_number",
+                int(record.pose_number),
+            )
+            molecule.SetProp(
+                "pocket_id",
+                str(record.pocket_id),
+            )
+            molecule.SetIntProp(
+                "pocket_rank",
+                int(record.pocket_rank),
+            )
+
+            if record.fpocket_score is not None:
+                molecule.SetDoubleProp(
+                    "fpocket_score",
+                    float(record.fpocket_score),
+                )
+
+            writer.write(molecule)
+            written += 1
+    finally:
+        writer.close()
+
+    if (
+        written == 0
+        or not output_path.is_file()
+        or output_path.stat().st_size == 0
+    ):
+        raise RuntimeError(
+            "Selected-pocket poses could not be persisted."
+        )
+
+    return output_path
+
+
+def _run_selected_pocket_pose_recovery(
+    *,
+    reference_ligand: Path,
+    records: list[PoseRecord],
+    output_dir: Path,
+    ligand_name: str,
+    pocket_id: str,
+    rmsd_threshold: float,
+    autobox_ligand: Path | None = None,
+) -> tuple[dict[str, object], dict[str, Path]]:
+    """Evaluate the selected pocket only after ordinary selection."""
+    pose_set_path = (
+        output_dir
+        / "pose_recovery_selected_pocket_poses.sdf"
+    )
+
+    _write_pose_records_sdf(
+        records,
+        pose_set_path,
+    )
+
+    summary = evaluate_scored_pose_sdf(
+        reference_ligand=reference_ligand,
+        poses_sdf=pose_set_path,
+        rmsd_threshold=rmsd_threshold,
+    )
+
+    same_file_as_autobox = False
+
+    if autobox_ligand is not None:
+        try:
+            same_file_as_autobox = (
+                reference_ligand.resolve()
+                == Path(autobox_ligand).resolve()
+            )
+        except OSError:
+            same_file_as_autobox = (
+                str(reference_ligand)
+                == str(autobox_ligand)
+            )
+
+    summary.update(
+        {
+            "evaluated_compound": ligand_name,
+            "evaluated_pocket_id": pocket_id,
+            "evaluation_stage": (
+                "after normal GNINA scoring, "
+                "PoseBusters filtering, and "
+                "pocket selection"
+            ),
+            "reference_ligand_used_for_posthoc_evaluation": True,
+            "reference_ligand_used_for_pocket_selection": False,
+            "reference_ligand_used_for_box_definition": (
+                same_file_as_autobox
+            ),
+            "reference_ligand_used_for_docking": (
+                same_file_as_autobox
+            ),
+            "reference_ligand_also_supplied_as_autobox_ligand": (
+                same_file_as_autobox
+            ),
+            "autobox_ligand": (
+                str(autobox_ligand)
+                if autobox_ligand is not None
+                else None
+            ),
+            "evaluated_pose_source": (
+                "all raw GNINA poses from the normally "
+                "selected pocket across configured seeds"
+            ),
+        }
+    )
+
+    outputs = write_scored_pose_outputs(
+        summary,
+        output_dir,
+    )
+
+    return summary, outputs
+
 def run_pipeline(
     *,
     receptor_pdb: Path,
@@ -137,6 +314,8 @@ def run_pipeline(
     auto_retrieve_max_candidates: int = 20,
     auto_retrieve_fetch_structures: bool = True,
     auto_retrieve_pubchem_timeout_seconds: int = 60,
+    reference_ligand: Path | None = None,
+    pose_recovery_rmsd_threshold: float = 2.0,
 ) -> list[Path]:
     cache_root = data_root / "cache"
     work_root = data_root / "work"
@@ -166,6 +345,17 @@ def run_pipeline(
             path.unlink()
         for path in output_dir.glob("homolog_search_*.json"):
             path.unlink()
+
+        for filename in (
+            "pose_recovery_selected_pocket_poses.sdf",
+            "pose_set_recovery_summary.json",
+            "pose_set_recovery_metrics.csv",
+            "pose_set_recovery_report.md",
+        ):
+            stale_path = output_dir / filename
+
+            if stale_path.exists():
+                stale_path.unlink()
 
     homology_executor: ThreadPoolExecutor | None = None
     homology_future = None
@@ -244,6 +434,29 @@ def run_pipeline(
             timeout_seconds=homolog_timeout_seconds,
         )
 
+    if pose_recovery_rmsd_threshold <= 0:
+        raise ValueError(
+            "pose_recovery_rmsd_threshold must be greater than zero"
+        )
+
+    if reference_ligand is not None:
+        reference_ligand = Path(reference_ligand)
+
+        if (
+            not reference_ligand.is_file()
+            or reference_ligand.stat().st_size == 0
+        ):
+            raise FileNotFoundError(
+                "Reference ligand was not found or is empty: "
+                f"{reference_ligand}"
+            )
+
+        if len(ligand_requests) != 1:
+            raise ValueError(
+                "--reference-ligand currently requires exactly one "
+                "docked ligand"
+            )
+
     temporary: tempfile.TemporaryDirectory[str] | None = None
 
     if keep_workdir:
@@ -311,6 +524,10 @@ def run_pipeline(
             all_valid_records = []
             total_failures = 0
             ligand_pocket_rows: list[dict[str, object]] = []
+            raw_records_by_pocket: dict[
+                str,
+                list[PoseRecord],
+            ] = {}
 
             for pocket in pockets:
                 print(f"\n[POCKET RUN] {ligand.name}: {pocket.pocket_id}")
@@ -327,6 +544,10 @@ def run_pipeline(
                     gnina_bin=gnina_bin,
                     cpu=cpu,
                     device=device,
+                )
+
+                raw_records_by_pocket[pocket.pocket_id] = list(
+                    raw_records
                 )
 
                 try:
@@ -403,6 +624,71 @@ def run_pipeline(
                     f"score source="
                     f"{selected_pocket['score_source']}"
                 )
+
+                if reference_ligand is not None:
+                    selected_pocket_id = str(
+                        selected_pocket["pocket_id"]
+                    )
+
+                    selected_records = (
+                        raw_records_by_pocket.get(
+                            selected_pocket_id,
+                            [],
+                        )
+                    )
+
+                    if not selected_records:
+                        raise RuntimeError(
+                            "The selected pocket's raw GNINA "
+                            "records could not be located."
+                        )
+
+                    pose_summary, pose_outputs = (
+                        _run_selected_pocket_pose_recovery(
+                            reference_ligand=reference_ligand,
+                            records=selected_records,
+                            output_dir=output_dir,
+                            ligand_name=ligand.name,
+                            pocket_id=selected_pocket_id,
+                            rmsd_threshold=(
+                                pose_recovery_rmsd_threshold
+                            ),
+                            autobox_ligand=(
+                                autobox_ligand
+                            ),
+                        )
+                    )
+
+                    print(
+                        "\n[POSE_RECOVERY] "
+                        f"Evaluated compound: {ligand.name}"
+                    )
+                    print(
+                        "[POSE_RECOVERY] Normally selected pocket: "
+                        f"{selected_pocket_id}"
+                    )
+                    print(
+                        "[POSE_RECOVERY] Top CNN pose RMSD: "
+                        f"{pose_summary['top_cnn_pose']['heavy_atom_rmsd']:.3f} Å"
+                    )
+                    print(
+                        "[POSE_RECOVERY] Best sampled RMSD: "
+                        f"{pose_summary['best_sampled_pose']['heavy_atom_rmsd']:.3f} Å"
+                    )
+                    print(
+                        "[POSE_RECOVERY] Sampling pass: "
+                        f"{pose_summary['sampling_pass']}"
+                    )
+                    print(
+                        "[POSE_RECOVERY] Ranking pass: "
+                        f"{pose_summary['ranking_pass']}"
+                    )
+
+                    for label, pose_path in pose_outputs.items():
+                        print(
+                            f"[POSE_RECOVERY] {label}: "
+                            f"{pose_path}"
+                        )
 
             print(f"[VALIDITY] Failure records: {total_failures}")
 

@@ -70,5 +70,87 @@ class CliAutoRetrieveTests(unittest.TestCase):
             self.assertEqual(kwargs["auto_retrieve_max_candidates"], 3)
 
 
+    def test_parser_accepts_pose_recovery_flags(
+        self,
+    ):
+        args = build_parser().parse_args(
+            [
+                "--receptor",
+                "/tmp/receptor.pdb",
+                "--data-root",
+                "/tmp/data",
+                "--ligand-file",
+                "/tmp/ligand.sdf",
+                "--reference-ligand",
+                "/tmp/reference.sdf",
+                "--pose-recovery-rmsd-threshold",
+                "1.75",
+            ]
+        )
+
+        self.assertEqual(
+            args.reference_ligand,
+            "/tmp/reference.sdf",
+        )
+        self.assertAlmostEqual(
+            args.pose_recovery_rmsd_threshold,
+            1.75,
+        )
+
+    def test_pose_recovery_arguments_are_forwarded_to_pipeline(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+
+            receptor = tmp / "receptor.pdb"
+            ligand = tmp / "ligand.sdf"
+            reference = tmp / "reference.sdf"
+
+            receptor.write_text(
+                "END\n",
+                encoding="utf-8",
+            )
+            ligand.write_text(
+                "ligand\n",
+                encoding="utf-8",
+            )
+            reference.write_text(
+                "reference\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "compoundrank.cli.run_pipeline"
+            ) as mocked:
+                main(
+                    [
+                        "--receptor",
+                        str(receptor),
+                        "--data-root",
+                        str(tmp / "data"),
+                        "--ligand-file",
+                        str(ligand),
+                        "--reference-ligand",
+                        str(reference),
+                        "--pose-recovery-rmsd-threshold",
+                        "1.5",
+                    ]
+                )
+
+            kwargs = mocked.call_args.kwargs
+
+            self.assertEqual(
+                kwargs["reference_ligand"],
+                reference.resolve(),
+            )
+            self.assertAlmostEqual(
+                kwargs[
+                    "pose_recovery_rmsd_threshold"
+                ],
+                1.5,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
