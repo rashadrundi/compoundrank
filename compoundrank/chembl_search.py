@@ -1488,26 +1488,294 @@ def _evidence_level(pchembl_value: float) -> str:
     return "exploratory"
 
 
+def _activity_evidence_category(
+    activity: dict[str, Any],
+) -> str:
+    """Conservatively classify the type of measured assay evidence."""
+    standard_type = str(
+        activity.get("standard_type") or ""
+    ).strip().upper()
+
+    assay_type = str(
+        activity.get("assay_type") or ""
+    ).strip().upper()
+
+    if standard_type == "KD":
+        return "direct_binding"
+
+    if standard_type == "KI":
+        return "direct_inhibition_constant"
+
+    if standard_type == "IC50" and assay_type == "B":
+        return "biochemical_inhibition"
+
+    if standard_type == "IC50" and assay_type == "F":
+        return "functional_inhibition"
+
+    if standard_type == "EC50" and assay_type == "F":
+        return "functional_activity"
+
+    if assay_type == "B":
+        return "biochemical_activity"
+
+    if assay_type == "F":
+        return "functional_activity"
+
+    return "measured_activity_unspecified"
+
+
+def _supporting_activity_record(
+    activity: dict[str, Any],
+    target: dict[str, Any],
+) -> dict[str, Any]:
+    """Retain ChEMBL activity and assay provenance."""
+    return {
+        "activity_id": activity.get(
+            "activity_id"
+        ),
+        "assay_chembl_id": activity.get(
+            "assay_chembl_id"
+        ),
+        "document_chembl_id": activity.get(
+            "document_chembl_id"
+        ),
+        "target_chembl_id": (
+            activity.get("target_chembl_id")
+            or target.get("target_chembl_id")
+        ),
+        "target_pref_name": (
+            activity.get("target_pref_name")
+            or target.get("pref_name")
+        ),
+        "target_organism": (
+            activity.get("target_organism")
+            or target.get("organism")
+        ),
+        "assay_type": activity.get(
+            "assay_type"
+        ),
+        "assay_description": activity.get(
+            "assay_description"
+        ),
+        "bao_label": activity.get(
+            "bao_label"
+        ),
+        "bao_endpoint": activity.get(
+            "bao_endpoint"
+        ),
+        "confidence_score": activity.get(
+            "confidence_score"
+        ),
+        "standard_type": activity.get(
+            "standard_type"
+        ),
+        "standard_relation": activity.get(
+            "standard_relation"
+        ),
+        "standard_value": activity.get(
+            "standard_value"
+        ),
+        "standard_units": activity.get(
+            "standard_units"
+        ),
+        "pchembl_value": _as_float(
+            activity.get("pchembl_value")
+        ),
+        "activity_comment": activity.get(
+            "activity_comment"
+        ),
+        "data_validity_comment": activity.get(
+            "data_validity_comment"
+        ),
+        "potential_duplicate": activity.get(
+            "potential_duplicate"
+        ),
+        "evidence_category": (
+            _activity_evidence_category(
+                activity
+            )
+        ),
+    }
+
+
 def make_chembl_candidate(
     activity: dict[str, Any],
     target: dict[str, Any],
+    *,
+    target_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Normalize one ChEMBL activity into the Stage 4A schema."""
     molecule_id = str(
         activity["molecule_chembl_id"]
     ).strip()
+
     preferred_name = str(
         activity.get("molecule_pref_name") or ""
     ).strip()
-    pchembl_value = float(activity["pchembl_value"])
 
-    compound_name = preferred_name or molecule_id
+    pchembl_value = float(
+        activity["pchembl_value"]
+    )
+
+    compound_name = (
+        preferred_name
+        or molecule_id
+    )
+
+    context = target_context or {}
+
+    submitted_target_name = str(
+        context.get("target_name") or ""
+    ).strip()
+
+    submitted_target_class = str(
+        context.get("target_class") or ""
+    ).strip()
+
+    submitted_enzyme_class = str(
+        context.get("enzyme_class") or ""
+    ).strip()
+
+    submitted_viral_family = str(
+        context.get("viral_family") or ""
+    ).strip()
+
+    evidence_confidence = str(
+        context.get("confidence") or ""
+    ).strip()
+
+    special_domain_label = str(
+        context.get("special_domain_label") or ""
+    ).strip()
+
+    special_domain_accession = str(
+        context.get("special_domain_accession") or ""
+    ).strip()
+
+    reference_target_name = str(
+        target.get("pref_name") or ""
+    ).strip()
+
+    reference_target_type = str(
+        target.get("target_type") or ""
+    ).strip()
+
+    reference_organism = str(
+        target.get("organism") or ""
+    ).strip()
+
+    domain_basis = [
+        value
+        for value in (
+            special_domain_label,
+            special_domain_accession,
+        )
+        if value
+    ]
+
+    submitted_target = {
+        "target_name": (
+            submitted_target_name
+            or None
+        ),
+        "target_class": (
+            submitted_target_class
+            or None
+        ),
+        "enzyme_class": (
+            submitted_enzyme_class
+            or None
+        ),
+        "viral_family": (
+            submitted_viral_family
+            or None
+        ),
+        "special_domain_label": (
+            special_domain_label
+            or None
+        ),
+        "special_domain_accession": (
+            special_domain_accession
+            or None
+        ),
+        "evidence_confidence": (
+            evidence_confidence
+            or None
+        ),
+    }
+
+    reference_target = {
+        "chembl_target_id": target.get(
+            "target_chembl_id"
+        ),
+        "target_name": (
+            reference_target_name
+            or None
+        ),
+        "target_type": (
+            reference_target_type
+            or None
+        ),
+        "organism": (
+            reference_organism
+            or None
+        ),
+        "tax_id": target.get(
+            "tax_id"
+        ),
+        "resolution_route": target.get(
+            "target_resolution_route"
+        ),
+        "target_search_term": target.get(
+            "target_search_term"
+        ),
+        "target_match_score": target.get(
+            "target_match_score"
+        ),
+        "sequence_identity": target.get(
+            "sequence_identity"
+        ),
+        "sequence_query_coverage": target.get(
+            "sequence_query_coverage"
+        ),
+        "matched_component_id": target.get(
+            "matched_component_id"
+        ),
+        "matched_component_accession": target.get(
+            "matched_component_accession"
+        ),
+        "matched_component_description": target.get(
+            "matched_component_description"
+        ),
+    }
+
+    activity_record = _supporting_activity_record(
+        activity,
+        target,
+    )
+
+    submitted_label = (
+        submitted_target_name
+        or "the submitted target"
+    )
+
+    reference_label = (
+        reference_target_name
+        or str(
+            target.get("target_chembl_id")
+            or "the ChEMBL reference target"
+        )
+    )
 
     return {
         "compound_name": compound_name,
         "retrieval_rank": None,
-        "design_status": "database_observed_ligand",
-        "discovery_source": "chembl_activity",
+        "design_status": (
+            "database_observed_ligand"
+        ),
+        "discovery_source": (
+            "chembl_activity"
+        ),
         "hardcoded_seed": False,
         "retrieval_route": (
             "generic_chembl_target_activity_search"
@@ -1515,9 +1783,11 @@ def make_chembl_candidate(
         "retrieval_rule_id": None,
         "retrieval_rule_label": None,
         "retrieval_reason": (
-            "Retrieved from a measured ChEMBL activity "
-            f"associated with target "
-            f"{target.get('target_chembl_id')}."
+            "Retrieved from a measured ChEMBL "
+            f"activity associated with reference "
+            f"target {reference_label}; transferred "
+            f"as ligand evidence for "
+            f"{submitted_label}."
         ),
         "discovery_query": target.get(
             "discovery_query"
@@ -1528,25 +1798,90 @@ def make_chembl_candidate(
         "target_match_score": target.get(
             "target_match_score"
         ),
-        "target_name": target.get("pref_name"),
-        "target_class": target.get("target_type"),
-        "enzyme_class": None,
-        "viral_family": target.get("organism"),
-        "target_evidence_confidence": None,
-        "special_domain_label": None,
-        "special_domain_accession": None,
-        "target_family_basis": target.get(
-            "pref_name"
+
+        # Backward-compatible submitted-target fields.
+        "target_name": (
+            submitted_target_name
+            or reference_target_name
+            or None
         ),
-        "domain_basis": [],
+        "target_class": (
+            submitted_target_class
+            or reference_target_type
+            or None
+        ),
+        "enzyme_class": (
+            submitted_enzyme_class
+            or None
+        ),
+        "viral_family": (
+            submitted_viral_family
+            or reference_organism
+            or None
+        ),
+        "target_evidence_confidence": (
+            evidence_confidence
+            or None
+        ),
+        "special_domain_label": (
+            special_domain_label
+            or None
+        ),
+        "special_domain_accession": (
+            special_domain_accession
+            or None
+        ),
+        "domain_basis": domain_basis,
+
+        # Explicit submitted/reference separation.
+        "submitted_target": submitted_target,
+        "reference_target": reference_target,
+        "reference_target_name": (
+            reference_target_name
+            or None
+        ),
+        "reference_target_type": (
+            reference_target_type
+            or None
+        ),
+        "reference_target_organism": (
+            reference_organism
+            or None
+        ),
+        "target_resolution_route": target.get(
+            "target_resolution_route"
+        ),
+        "sequence_identity": target.get(
+            "sequence_identity"
+        ),
+        "sequence_query_coverage": target.get(
+            "sequence_query_coverage"
+        ),
+        "target_family_basis": (
+            reference_target_name
+            or None
+        ),
+
         "evidence_level": _evidence_level(
             pchembl_value
+        ),
+        "primary_activity_evidence_category": (
+            activity_record[
+                "evidence_category"
+            ]
         ),
         "retrieval_terms": [
             target.get("target_search_term")
         ],
-        "source_databases": ["ChEMBL"],
-        "source_notes": "",
+        "source_databases": [
+            "ChEMBL"
+        ],
+        "source_notes": (
+            "The submitted FASTA remains the "
+            "docking target. The ChEMBL target is "
+            "a reference source of transferable "
+            "ligand evidence."
+        ),
         "chembl_target_id": target.get(
             "target_chembl_id"
         ),
@@ -1573,7 +1908,9 @@ def make_chembl_candidate(
             "standard_units"
         ),
         "pchembl_value": pchembl_value,
-        "assay_type": activity.get("assay_type"),
+        "assay_type": activity.get(
+            "assay_type"
+        ),
         "canonical_smiles": activity.get(
             "canonical_smiles"
         ),
@@ -1583,7 +1920,9 @@ def make_chembl_candidate(
         ),
         "inchi_key": None,
         "structure_source": None,
-        "structure_fetch_status": "not_attempted",
+        "structure_fetch_status": (
+            "not_attempted"
+        ),
         "structure_fetch_error": None,
         "local_sdf_path": None,
         "selected_for_docking": True,
@@ -1600,30 +1939,12 @@ def make_chembl_candidate(
             "hypothetical_modification": None,
         },
         "limitations": [
-            "Database activity does not prove inhibition of "
-            "the submitted sequence.",
-            "Assay conditions and target transferability require "
-            "later evidence review.",
+            "Database activity does not prove inhibition of the submitted sequence.",
+            "Reference-target transferability requires sequence, pocket, and assay review.",
+            "Assay evidence categories are conservative interpretations of available ChEMBL fields.",
         ],
         "supporting_activities": [
-            {
-                "activity_id": activity.get(
-                    "activity_id"
-                ),
-                "assay_chembl_id": activity.get(
-                    "assay_chembl_id"
-                ),
-                "standard_type": activity.get(
-                    "standard_type"
-                ),
-                "standard_value": activity.get(
-                    "standard_value"
-                ),
-                "standard_units": activity.get(
-                    "standard_units"
-                ),
-                "pchembl_value": pchembl_value,
-            }
+            activity_record
         ],
     }
 
@@ -1692,6 +2013,7 @@ def retrieve_chembl_candidates(
             candidate = make_chembl_candidate(
                 activity,
                 target,
+                target_context=target_context,
             )
             molecule_id = str(
                 candidate["chembl_molecule_id"]

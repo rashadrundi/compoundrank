@@ -2,6 +2,7 @@ import unittest
 
 from compoundrank.chembl_search import (
     build_chembl_target_terms,
+    make_chembl_candidate,
     retrieve_chembl_candidates,
     search_chembl_targets,
     search_chembl_targets_sequence_first,
@@ -450,6 +451,156 @@ class ChemblSearchTests(unittest.TestCase):
         self.assertEqual(
             targets[0]["target_resolution_route"],
             "sequence_alignment",
+        )
+
+
+    def test_candidate_separates_submitted_and_reference_targets(
+        self,
+    ):
+        activity = {
+            "activity_id": 7001,
+            "assay_chembl_id": "CHEMBL_ASSAY_7001",
+            "document_chembl_id": "CHEMBL_DOC_7001",
+            "molecule_chembl_id": "CHEMBL_MOL_7001",
+            "molecule_pref_name": "Example inhibitor",
+            "canonical_smiles": "CCO",
+            "standard_type": "Ki",
+            "standard_relation": "=",
+            "standard_value": "1.0",
+            "standard_units": "nM",
+            "pchembl_value": "9.0",
+            "assay_type": "B",
+            "assay_description": (
+                "Biochemical inhibition assay"
+            ),
+            "bao_label": (
+                "single protein format"
+            ),
+            "bao_endpoint": "BAO_0000190",
+            "confidence_score": 9,
+            "potential_duplicate": 0,
+            "data_validity_comment": None,
+        }
+
+        reference_target = {
+            "target_chembl_id": (
+                "CHEMBL_REFERENCE"
+            ),
+            "pref_name": (
+                "Replicase polyprotein 1ab"
+            ),
+            "target_type": "SINGLE PROTEIN",
+            "organism": "Example coronavirus",
+            "tax_id": 1234,
+            "target_resolution_route": (
+                "sequence_alignment"
+            ),
+            "target_search_term": (
+                "coronavirus main protease"
+            ),
+            "target_match_score": 215.0,
+            "sequence_identity": 1.0,
+            "sequence_query_coverage": 1.0,
+            "matched_component_accession": (
+                "EXAMPLE_MPRO"
+            ),
+            "matched_component_description": (
+                "Main protease"
+            ),
+        }
+
+        submitted_context = {
+            "target_name": (
+                "coronavirus 3C-like "
+                "main protease"
+            ),
+            "target_class": (
+                "viral protease"
+            ),
+            "enzyme_class": (
+                "cysteine protease"
+            ),
+            "viral_family": (
+                "Coronaviridae-like / "
+                "coronavirus"
+            ),
+            "confidence": "high",
+            "special_domain_label": (
+                "Coronavirus 3C-like "
+                "main protease domain"
+            ),
+            "special_domain_accession": (
+                "cd21666"
+            ),
+        }
+
+        candidate = make_chembl_candidate(
+            activity,
+            reference_target,
+            target_context=submitted_context,
+        )
+
+        self.assertEqual(
+            candidate["target_name"],
+            (
+                "coronavirus 3C-like "
+                "main protease"
+            ),
+        )
+        self.assertEqual(
+            candidate["enzyme_class"],
+            "cysteine protease",
+        )
+        self.assertEqual(
+            candidate[
+                "target_evidence_confidence"
+            ],
+            "high",
+        )
+        self.assertEqual(
+            candidate["submitted_target"][
+                "special_domain_accession"
+            ],
+            "cd21666",
+        )
+        self.assertEqual(
+            candidate["reference_target"][
+                "chembl_target_id"
+            ],
+            "CHEMBL_REFERENCE",
+        )
+        self.assertEqual(
+            candidate["reference_target"][
+                "target_name"
+            ],
+            "Replicase polyprotein 1ab",
+        )
+        self.assertEqual(
+            candidate["reference_target"][
+                "sequence_query_coverage"
+            ],
+            1.0,
+        )
+
+        supporting = candidate[
+            "supporting_activities"
+        ][0]
+
+        self.assertEqual(
+            supporting["document_chembl_id"],
+            "CHEMBL_DOC_7001",
+        )
+        self.assertEqual(
+            supporting["assay_description"],
+            "Biochemical inhibition assay",
+        )
+        self.assertEqual(
+            supporting["confidence_score"],
+            9,
+        )
+        self.assertEqual(
+            supporting["evidence_category"],
+            "direct_inhibition_constant",
         )
 
 
