@@ -477,6 +477,388 @@ def _render_docking_attempt_summary_section(output_dir: Path) -> list[str]:
 
     return lines
 
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    number = _coerce_float(value)
+
+    if number is None:
+        return None
+
+    return int(number)
+
+
+def _selection_rank_value(row: dict[str, Any]) -> int:
+    rank = _coerce_int(row.get("selection_rank"))
+
+    if rank is None:
+        return 9999
+
+    return rank
+
+
+def _selected_attempt(
+    rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for row in rows:
+        if row.get("selected") is True:
+            return row
+
+    for row in rows:
+        if _selection_rank_value(row) == 1:
+            return row
+
+    return rows[0] if rows else None
+
+
+def _selection_confidence(
+    rows: list[dict[str, Any]],
+) -> tuple[float | None, str]:
+    selected = _selected_attempt(rows)
+
+    if selected is None:
+        return None, "unavailable"
+
+    selected_score = _coerce_float(
+        selected.get("top_cnn_score")
+    )
+
+    alternative_scores = [
+        score
+        for row in rows
+        if row is not selected
+        for score in [
+            _coerce_float(
+                row.get("top_cnn_score")
+            )
+        ]
+        if score is not None
+    ]
+
+    if selected_score is None:
+        return None, "unavailable"
+
+    if not alternative_scores:
+        return None, "single pocket"
+
+    margin = selected_score - max(
+        alternative_scores
+    )
+
+    if margin >= 0.20:
+        label = "high separation"
+    elif margin >= 0.10:
+        label = "moderate separation"
+    else:
+        label = "low separation"
+
+    return margin, label
+
+
+def _format_box_triplet(
+    pocket: dict[str, Any],
+    prefix: str,
+) -> str:
+    values = [
+        _coerce_float(
+            pocket.get(f"{prefix}_{axis}")
+        )
+        for axis in ("x", "y", "z")
+    ]
+
+    if any(value is None for value in values):
+        return "unknown"
+
+    return ", ".join(
+        f"{value:.3f}"
+        for value in values
+        if value is not None
+    )
+
+
+def _render_pocket_selection_section(
+    output_dir: Path,
+) -> list[str]:
+    summary_path = (
+        output_dir
+        / "pocket_selection_summary.json"
+    )
+    definitions_path = (
+        output_dir
+        / "pocket_definitions.json"
+    )
+    summary_csv = (
+        output_dir
+        / "pocket_selection_summary.csv"
+    )
+
+    summary = _load_json(summary_path)
+    definitions = _load_json(definitions_path)
+
+    if summary is None and definitions is None:
+        return []
+
+    lines = [
+        "## Pocket Detection and Selection",
+        "",
+    ]
+
+    if summary is not None:
+        attempts_value = summary.get(
+            "attempts",
+            [],
+        )
+        attempts = [
+            row
+            for row in attempts_value
+            if isinstance(row, dict)
+        ]
+
+        grouped: dict[
+            str,
+            list[dict[str, Any]],
+        ] = {}
+
+        for row in attempts:
+            compound = str(
+                row.get(
+                    "compound",
+                    "unknown",
+                )
+            )
+            grouped.setdefault(
+                compound,
+                [],
+            ).append(row)
+
+        for rows in grouped.values():
+            rows.sort(
+                key=_selection_rank_value
+            )
+
+        reference_used = bool(
+            summary.get(
+                "reference_ligand_used_for_selection",
+                False,
+            )
+        )
+
+        lines += [
+            f"- Selection summary: `{_relative_or_original(output_dir, summary_path)}`",
+            (
+                f"- Selection table: "
+                f"`{_relative_or_original(output_dir, summary_csv)}`"
+                if summary_csv.exists()
+                else "- Selection table: unavailable"
+            ),
+            f"- Selection method: {_format_value(summary.get('selection_method'))}",
+            (
+                "- Reference ligand used for pocket selection: "
+                + ("yes" if reference_used else "no")
+            ),
+            f"- Compounds evaluated: {_format_value(summary.get('compound_count'))}",
+            f"- Total pocket attempts: {_format_value(summary.get('attempt_count'))}",
+            "",
+        ]
+
+        if grouped:
+            lines += [
+                "### Selected Pocket per Compound",
+                "",
+                "| Compound | Selected pocket | fpocket rank | fpocket score | Top CNN score | CNN affinity | Score source | CNN-score margin | Selection confidence |",
+                "|---|---|---:|---:|---:|---:|---|---:|---|",
+            ]
+
+            for compound in sorted(grouped):
+                rows = grouped[compound]
+                selected = _selected_attempt(
+                    rows
+                )
+
+                if selected is None:
+                    continue
+
+                margin, confidence = (
+                    _selection_confidence(rows)
+                )
+
+                lines.append(
+                    "| "
+                    f"{_format_value(compound)} | "
+                    f"{_format_value(selected.get('pocket_id'))} | "
+                    f"{_format_value(selected.get('pocket_rank'))} | "
+                    f"{_format_value(selected.get('fpocket_score'))} | "
+                    f"{_format_value(selected.get('top_cnn_score'))} | "
+                    f"{_format_value(selected.get('top_cnn_affinity'))} | "
+                    f"{_format_value(selected.get('score_source'))} | "
+                    f"{_format_value(margin)} | "
+                    f"{confidence} |"
+                )
+
+            lines += [
+                "",
+                "### All Pocket Attempts",
+                "",
+                "| Compound | Selection rank | Pocket | fpocket rank | fpocket score | Raw poses | Accepted | Rejected | Top CNN score | CNN affinity | Affinity | Score source |",
+                "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            ]
+
+            for compound in sorted(grouped):
+                for row in grouped[compound]:
+                    lines.append(
+                        "| "
+                        f"{_format_value(compound)} | "
+                        f"{_format_value(row.get('selection_rank'))} | "
+                        f"{_format_value(row.get('pocket_id'))} | "
+                        f"{_format_value(row.get('pocket_rank'))} | "
+                        f"{_format_value(row.get('fpocket_score'))} | "
+                        f"{_format_value(row.get('raw_poses'))} | "
+                        f"{_format_value(row.get('accepted_poses'))} | "
+                        f"{_format_value(row.get('rejected_poses'))} | "
+                        f"{_format_value(row.get('top_cnn_score'))} | "
+                        f"{_format_value(row.get('top_cnn_affinity'))} | "
+                        f"{_format_value(row.get('top_minimized_affinity'))} | "
+                        f"{_format_value(row.get('score_source'))} |"
+                    )
+
+            lines.append("")
+
+            warnings: list[str] = []
+
+            for compound in sorted(grouped):
+                rows = grouped[compound]
+                selected = _selected_attempt(
+                    rows
+                )
+
+                if selected is None:
+                    continue
+
+                margin, confidence = (
+                    _selection_confidence(rows)
+                )
+
+                if (
+                    selected.get("score_source")
+                    == "raw_pose_fallback"
+                ):
+                    warnings.append(
+                        f"{compound}: selected pocket "
+                        "was ranked using raw GNINA poses "
+                        "because no PoseBusters-accepted "
+                        "pose was available."
+                    )
+
+                if confidence == "low separation":
+                    warnings.append(
+                        f"{compound}: the selected pocket "
+                        f"led the next alternative by only "
+                        f"{_format_value(margin)} CNNscore; "
+                        "the site assignment should be "
+                        "treated as uncertain."
+                    )
+
+                fpocket_rank = _coerce_int(
+                    selected.get("pocket_rank")
+                )
+
+                if (
+                    fpocket_rank is not None
+                    and fpocket_rank > 1
+                ):
+                    warnings.append(
+                        f"{compound}: GNINA selected "
+                        f"fpocket rank {fpocket_rank}, "
+                        "overriding fpocket's geometry-only "
+                        "rank 1 result."
+                    )
+
+            if warnings:
+                lines += [
+                    "### Pocket-Selection Notes",
+                    "",
+                ]
+
+                for warning in warnings:
+                    lines.append(
+                        f"- {warning}"
+                    )
+
+                lines.append("")
+
+            lines += [
+                "_Selection confidence is a descriptive "
+                "heuristic based on the difference between "
+                "the selected pocket's top CNNscore and the "
+                "next-best tested pocket. It is not a "
+                "calibrated probability of binding-site "
+                "correctness._",
+                "",
+            ]
+
+    if definitions is not None:
+        pockets_value = definitions.get(
+            "pockets",
+            [],
+        )
+        pockets = [
+            pocket
+            for pocket in pockets_value
+            if isinstance(pocket, dict)
+        ]
+
+        lines += [
+            "### Docking Pocket Definitions",
+            "",
+            f"- Pocket-definition file: `{_relative_or_original(output_dir, definitions_path)}`",
+            f"- Pocket count: {_format_value(definitions.get('pocket_count'))}",
+            f"- Ranking method: {_format_value(definitions.get('ranking_method'))}",
+            "",
+        ]
+
+        if pockets:
+            lines += [
+                "| Pocket | fpocket rank | fpocket score | Center x, y, z | Size x, y, z | Source |",
+                "|---|---:|---:|---|---|---|",
+            ]
+
+            pockets.sort(
+                key=lambda pocket: (
+                    _coerce_int(
+                        pocket.get("pocket_rank")
+                    )
+                    or 9999
+                )
+            )
+
+            for pocket in pockets:
+                lines.append(
+                    "| "
+                    f"{_format_value(pocket.get('pocket_id'))} | "
+                    f"{_format_value(pocket.get('pocket_rank'))} | "
+                    f"{_format_value(pocket.get('fpocket_score'))} | "
+                    f"{_format_box_triplet(pocket, 'center')} | "
+                    f"{_format_box_triplet(pocket, 'size')} | "
+                    f"{_format_value(pocket.get('source'))} |"
+                )
+
+            lines.append("")
+
+    return lines
+
+
 def render_run_report(
     *,
     output_dir: Path,
@@ -493,6 +875,7 @@ def render_run_report(
     lines.extend(_render_target_section(target_evidence))
     lines.extend(_render_ligand_retrieval_section(output_dir))
     lines.extend(_render_docking_section(hypotheses))
+    lines.extend(_render_pocket_selection_section(output_dir))
     lines.extend(_render_docking_attempt_summary_section(output_dir))
 
     lines += [
