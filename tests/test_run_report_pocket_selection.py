@@ -229,5 +229,154 @@ class RunReportPocketSelectionTests(
             )
 
 
+    def test_report_includes_optional_pose_recovery_benchmark(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+
+            summary = {
+                "reference_ligand": (
+                    "/reference/"
+                    "8HUR_7YY_ensitrelvir_crystal.sdf"
+                ),
+                "poses_sdf": (
+                    "/work/docking/"
+                    "ensitrelvir/poses.sdf"
+                ),
+                "rmsd_method": (
+                    "symmetry-aware complete "
+                    "heavy-atom coordinate RMSD "
+                    "without translation or rotation"
+                ),
+                "bond_order_mapping": (
+                    "bond order ignored; atom elements, "
+                    "connectivity, ring membership, and "
+                    "complete atom coverage required"
+                ),
+                "rmsd_threshold_angstrom": 2.0,
+                "mapped_pose_count": 20,
+                "mapping_failure_count": 0,
+                "top_cnn_pose": {
+                    "pose_index": 1,
+                    "cnnscore": 0.823432922,
+                    "heavy_atom_rmsd": (
+                        1.4892266332345574
+                    ),
+                },
+                "best_sampled_pose": {
+                    "pose_index": 1,
+                    "cnnscore": 0.823432922,
+                    "heavy_atom_rmsd": (
+                        1.4892266332345574
+                    ),
+                },
+                "sampling_pass": True,
+                "ranking_pass": True,
+                "overall": (
+                    "cognate_pose_recovery_"
+                    "and_ranking_pass"
+                ),
+            }
+
+            (
+                output_dir
+                / "pose_set_recovery_summary.json"
+            ).write_text(
+                json.dumps(summary),
+                encoding="utf-8",
+            )
+
+            (
+                output_dir
+                / "pose_set_recovery_metrics.csv"
+            ).write_text(
+                "pose_index,cnnscore,"
+                "heavy_atom_rmsd\n"
+                "1,0.823432922,"
+                "1.4892266332345574\n",
+                encoding="utf-8",
+            )
+
+            (
+                output_dir
+                / "pose_set_recovery_report.md"
+            ).write_text(
+                "# Scored Pose-Recovery Report\n",
+                encoding="utf-8",
+            )
+
+            report_path = write_run_report(
+                output_dir=output_dir
+            )
+
+            report = report_path.read_text(
+                encoding="utf-8"
+            )
+
+            self.assertIn(
+                "## Cognate Pose-Recovery Benchmark",
+                report,
+            )
+            self.assertIn(
+                "8HUR_7YY_ensitrelvir_crystal.sdf",
+                report,
+            )
+            self.assertIn(
+                "Chemically mapped poses | 20",
+                report,
+            )
+            self.assertIn(
+                "Mapping failures | 0",
+                report,
+            )
+            self.assertIn(
+                "Top CNN score | 0.823433",
+                report,
+            )
+            self.assertIn(
+                "Top CNN pose RMSD | 1.489 Å",
+                report,
+            )
+            self.assertIn(
+                "Best sampled pose RMSD | 1.489 Å",
+                report,
+            )
+            self.assertIn(
+                "Sampling pass | yes",
+                report,
+            )
+            self.assertIn(
+                "Ranking pass | yes",
+                report,
+            )
+            self.assertIn(
+                (
+                    "cognate_pose_recovery_"
+                    "and_ranking_pass"
+                ),
+                report,
+            )
+
+    def test_report_omits_pose_recovery_when_summary_absent(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+
+            report_path = write_run_report(
+                output_dir=output_dir
+            )
+
+            report = report_path.read_text(
+                encoding="utf-8"
+            )
+
+            self.assertNotIn(
+                "## Cognate Pose-Recovery Benchmark",
+                report,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

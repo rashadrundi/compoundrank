@@ -19,6 +19,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from rdkit import Chem
+from rdkit.Chem import rdFMCS
+
 
 WATER_RESNAMES = {"HOH", "WAT", "DOD"}
 
@@ -436,58 +439,784 @@ def write_outputs(metrics: PoseRecoveryMetrics, output_dir: Path) -> dict[str, P
     }
 
 
+def _load_first_sdf_molecule(path: Path) -> Chem.Mol:
+    supplier = Chem.SDMolSupplier(
+        str(path),
+        removeHs=False,
+    )
+
+    molecule = next(
+        (
+            mol
+            for mol in supplier
+            if mol is not None
+        ),
+        None,
+    )
+
+    if molecule is None:
+        raise ValueError(
+            f"Could not read an SDF molecule from {path}"
+        )
+
+    return molecule
+
+
+def _heavy_rdkit_molecule(
+    molecule: Chem.Mol,
+) -> Chem.Mol:
+    result = Chem.RemoveHs(
+        Chem.Mol(molecule),
+        sanitize=True,
+    )
+    Chem.SanitizeMol(result)
+    return result
+
+
+def _molecule_property_float(
+    molecule: Chem.Mol,
+    names: tuple[str, ...],
+) -> float | None:
+    available = {
+        name.casefold(): name
+        for name in molecule.GetPropNames()
+    }
+
+    for requested in names:
+        actual = available.get(
+            requested.casefold()
+        )
+
+        if actual is None:
+            continue
+
+        try:
+            return float(
+                molecule.GetProp(actual)
+            )
+        except (TypeError, ValueError):
+            continue
+
+    return None
+
+
+def _coordinate_rmsd_from_map(
+    probe: Chem.Mol,
+    reference: Chem.Mol,
+    atom_map: list[tuple[int, int]],
+) -> float:
+    """Calculate mapped RMSD without translating or rotating coordinates."""
+    if not atom_map:
+        raise ValueError(
+            "An empty atom map cannot be used for RMSD."
+        )
+
+    probe_conf = probe.GetConformer()
+    reference_conf = reference.GetConformer()
+
+    squared_distance = 0.0
+
+    for probe_index, reference_index in atom_map:
+        probe_position = probe_conf.GetAtomPosition(
+            probe_index
+        )
+        reference_position = (
+            reference_conf.GetAtomPosition(
+                reference_index
+            )
+        )
+
+        dx = probe_position.x - reference_position.x
+        dy = probe_position.y - reference_position.y
+        dz = probe_position.z - reference_position.z
+
+        squared_distance += (
+            dx * dx
+            + dy * dy
+            + dz * dz
+        )
+
+    return math.sqrt(
+        squared_distance / len(atom_map)
+    )
+
+
+def symmetry_aware_nofit_rmsd(
+    probe: Chem.Mol,
+    reference: Chem.Mol,
+) -> tuple[float, int]:
+    """Calculate complete, element-mapped RMSD in the receptor frame.
+
+    Bond order is deliberately ignored during mapping because equivalent
+    ChEMBL, RCSB, RDKit, Open Babel, and GNINA files may encode aromaticity
+    or tautomeric bond orders differently. Atom elements, connectivity,
+    ring membership, complete atom coverage, and coordinates are retained.
+    """
+    probe = _heavy_rdkit_molecule(
+        probe
+    )
+    reference = _heavy_rdkit_molecule(
+        reference
+    )
+
+    if (
+        probe.GetNumAtoms()
+        != reference.GetNumAtoms()
+    ):
+        raise ValueError(
+            "Heavy-atom counts differ: "
+            f"probe={probe.GetNumAtoms()}, "
+            f"reference={reference.GetNumAtoms()}"
+        )
+
+    if (
+        probe.GetNumBonds()
+        != reference.GetNumBonds()
+    ):
+        raise ValueError(
+            "Heavy-atom bond counts differ: "
+            f"probe={probe.GetNumBonds()}, "
+            f"reference={reference.GetNumBonds()}"
+        )
+
+    mcs = rdFMCS.FindMCS(
+        [probe, reference],
+        atomCompare=(
+            rdFMCS.AtomCompare.CompareElements
+        ),
+        bondCompare=(
+            rdFMCS.BondCompare.CompareAny
+        ),
+        matchValences=False,
+        ringMatchesRingOnly=True,
+        completeRingsOnly=True,
+        matchChiralTag=False,
+        timeout=30,
+    )
+
+    if mcs.canceled:
+        raise RuntimeError(
+            "Complete atom mapping timed out."
+        )
+
+    if (
+        mcs.numAtoms != probe.GetNumAtoms()
+        or mcs.numBonds != probe.GetNumBonds()
+    ):
+        raise ValueError(
+            "Could not establish a complete "
+            "element-and-connectivity mapping: "
+            f"MCS atoms={mcs.numAtoms}/"
+            f"{probe.GetNumAtoms()}, "
+            f"MCS bonds={mcs.numBonds}/"
+            f"{probe.GetNumBonds()}"
+        )
+
+    query = Chem.MolFromSmarts(
+        mcs.smartsString
+    )
+
+    if query is None:
+        raise RuntimeError(
+            "Could not construct the complete MCS query."
+        )
+
+    probe_matches = probe.GetSubstructMatches(
+        query,
+        uniquify=True,
+        useChirality=False,
+        maxMatches=512,
+    )
+
+    reference_matches = (
+        reference.GetSubstructMatches(
+            query,
+            uniquify=True,
+            useChirality=False,
+            maxMatches=512,
+        )
+    )
+
+    if (
+        not probe_matches
+        or not reference_matches
+    ):
+        raise RuntimeError(
+            "Complete MCS mapping produced no atom matches."
+        )
+
+    best_rmsd = math.inf
+    mapping_count = 0
+
+    for probe_match in probe_matches:
+        for reference_match in reference_matches:
+            atom_map = list(
+                zip(
+                    probe_match,
+                    reference_match,
+                )
+            )
+
+            rmsd = _coordinate_rmsd_from_map(
+                probe,
+                reference,
+                atom_map,
+            )
+
+            mapping_count += 1
+
+            if rmsd < best_rmsd:
+                best_rmsd = rmsd
+
+    return best_rmsd, mapping_count
+
+
+def evaluate_scored_pose_sdf(
+    *,
+    reference_ligand: Path,
+    poses_sdf: Path,
+    rmsd_threshold: float = 2.0,
+) -> dict[str, Any]:
+    """Evaluate all scored GNINA poses against a cognate SDF pose."""
+    reference = _load_first_sdf_molecule(
+        reference_ligand
+    )
+
+    supplier = Chem.SDMolSupplier(
+        str(poses_sdf),
+        removeHs=False,
+    )
+
+    pose_records: list[dict[str, Any]] = []
+    mapping_failures: list[dict[str, Any]] = []
+
+    for pose_index, molecule in enumerate(
+        supplier,
+        start=1,
+    ):
+        if molecule is None:
+            mapping_failures.append(
+                {
+                    "pose_index": pose_index,
+                    "error": "RDKit could not read the pose.",
+                }
+            )
+            continue
+
+        cnnscore = _molecule_property_float(
+            molecule,
+            (
+                "CNNscore",
+                "CNN_score",
+            ),
+        )
+
+        try:
+            rmsd, mapping_count = (
+                symmetry_aware_nofit_rmsd(
+                    molecule,
+                    reference,
+                )
+            )
+        except Exception as exc:
+            mapping_failures.append(
+                {
+                    "pose_index": pose_index,
+                    "error": str(exc),
+                }
+            )
+            continue
+
+        pose_records.append(
+            {
+                "pose_index": pose_index,
+                "cnnscore": cnnscore,
+                "cnnaffinity": (
+                    _molecule_property_float(
+                        molecule,
+                        (
+                            "CNNaffinity",
+                            "CNN_affinity",
+                        ),
+                    )
+                ),
+                "affinity": (
+                    _molecule_property_float(
+                        molecule,
+                        (
+                            "minimizedAffinity",
+                            "minimized_affinity",
+                            "affinity",
+                        ),
+                    )
+                ),
+                "heavy_atom_rmsd": rmsd,
+                "mapping_count": mapping_count,
+            }
+        )
+
+    if not pose_records:
+        raise RuntimeError(
+            "No poses could be chemically mapped "
+            "to the reference ligand."
+        )
+
+    scored_records = [
+        record
+        for record in pose_records
+        if record["cnnscore"] is not None
+    ]
+
+    if not scored_records:
+        raise RuntimeError(
+            "No chemically mapped poses contained "
+            "a GNINA CNNscore."
+        )
+
+    by_score = sorted(
+        scored_records,
+        key=lambda record: (
+            -float(record["cnnscore"]),
+            float(record["heavy_atom_rmsd"]),
+        ),
+    )
+
+    by_rmsd = sorted(
+        scored_records,
+        key=lambda record: (
+            float(record["heavy_atom_rmsd"]),
+            -float(record["cnnscore"]),
+        ),
+    )
+
+    top_cnn_pose = by_score[0]
+    best_sampled_pose = by_rmsd[0]
+
+    sampling_pass = (
+        float(
+            best_sampled_pose[
+                "heavy_atom_rmsd"
+            ]
+        )
+        <= rmsd_threshold
+    )
+
+    ranking_pass = (
+        float(
+            top_cnn_pose[
+                "heavy_atom_rmsd"
+            ]
+        )
+        <= rmsd_threshold
+    )
+
+    if sampling_pass and ranking_pass:
+        overall = (
+            "cognate_pose_recovery_and_ranking_pass"
+        )
+    elif sampling_pass:
+        overall = (
+            "sampling_pass_ranking_failure"
+        )
+    else:
+        overall = (
+            "pose_recovery_failure"
+        )
+
+    return {
+        "reference_ligand": str(
+            reference_ligand
+        ),
+        "poses_sdf": str(
+            poses_sdf
+        ),
+        "rmsd_method": (
+            "symmetry-aware complete heavy-atom "
+            "coordinate RMSD without translation "
+            "or rotation"
+        ),
+        "bond_order_mapping": (
+            "bond order ignored; atom elements, "
+            "connectivity, ring membership, and "
+            "complete atom coverage required"
+        ),
+        "rmsd_threshold_angstrom": (
+            rmsd_threshold
+        ),
+        "mapped_pose_count": len(
+            pose_records
+        ),
+        "mapping_failure_count": len(
+            mapping_failures
+        ),
+        "mapping_failures": (
+            mapping_failures
+        ),
+        "top_cnn_pose": top_cnn_pose,
+        "best_sampled_pose": (
+            best_sampled_pose
+        ),
+        "sampling_pass": sampling_pass,
+        "ranking_pass": ranking_pass,
+        "overall": overall,
+        "poses_by_cnnscore": by_score,
+    }
+
+
+def write_scored_pose_outputs(
+    summary: dict[str, Any],
+    output_dir: Path,
+) -> dict[str, Path]:
+    """Write batch pose-recovery JSON, CSV, and Markdown outputs."""
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    json_path = (
+        output_dir
+        / "pose_set_recovery_summary.json"
+    )
+    csv_path = (
+        output_dir
+        / "pose_set_recovery_metrics.csv"
+    )
+    report_path = (
+        output_dir
+        / "pose_set_recovery_report.md"
+    )
+
+    json_path.write_text(
+        json.dumps(
+            summary,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = (
+        summary.get("poses_by_cnnscore")
+        or []
+    )
+
+    if records:
+        with csv_path.open(
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=list(
+                    records[0].keys()
+                ),
+            )
+            writer.writeheader()
+            writer.writerows(records)
+    else:
+        csv_path.write_text(
+            "",
+            encoding="utf-8",
+        )
+
+    top_pose = summary["top_cnn_pose"]
+    best_pose = summary[
+        "best_sampled_pose"
+    ]
+
+    report = f"""# Scored Pose-Recovery Report
+
+## Inputs
+
+- Reference ligand: `{summary['reference_ligand']}`
+- GNINA pose file: `{summary['poses_sdf']}`
+- RMSD method: {summary['rmsd_method']}
+- Pass threshold: {summary['rmsd_threshold_angstrom']:.3f} Å
+
+## Benchmark Result
+
+| Metric | Value |
+|---|---:|
+| Chemically mapped poses | {summary['mapped_pose_count']} |
+| Mapping failures | {summary['mapping_failure_count']} |
+| Top CNN pose index | {top_pose['pose_index']} |
+| Top CNN score | {top_pose['cnnscore']:.6f} |
+| Top CNN pose RMSD | {top_pose['heavy_atom_rmsd']:.3f} Å |
+| Best sampled pose index | {best_pose['pose_index']} |
+| Best sampled RMSD | {best_pose['heavy_atom_rmsd']:.3f} Å |
+| Sampling pass | {'yes' if summary['sampling_pass'] else 'no'} |
+| Ranking pass | {'yes' if summary['ranking_pass'] else 'no'} |
+
+## Overall
+
+`{summary['overall']}`
+
+## Interpretation Limits
+
+- RMSD is calculated in the existing receptor coordinate frame without translating or rotating the ligand.
+- Complete element-and-connectivity mapping is required.
+- Bond order is ignored only to tolerate equivalent aromaticity or tautomer encodings across molecular file sources.
+- A cognate redocking pass validates pose recovery under benchmark conditions; it does not prove biological inhibition.
+"""
+
+    report_path.write_text(
+        report,
+        encoding="utf-8",
+    )
+
+    return {
+        "pose_set_recovery_summary": (
+            json_path
+        ),
+        "pose_set_recovery_metrics": (
+            csv_path
+        ),
+        "pose_set_recovery_report": (
+            report_path
+        ),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Compare a docked ligand pose against a reference ligand pose.")
-    parser.add_argument("--reference-ligand", required=True, type=Path)
-    parser.add_argument("--docked-pose", required=True, type=Path)
-    parser.add_argument("--output-dir", required=True, type=Path)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compare docked ligand poses against "
+            "a reference ligand pose."
+        )
+    )
 
-    parser.add_argument("--reference-resname")
-    parser.add_argument("--reference-chain")
-    parser.add_argument("--reference-resseq")
+    parser.add_argument(
+        "--reference-ligand",
+        required=True,
+        type=Path,
+    )
 
-    parser.add_argument("--docked-resname")
-    parser.add_argument("--docked-chain")
-    parser.add_argument("--docked-resseq")
-    parser.add_argument("--no-openbabel", action="store_true", help="Disable optional Open Babel obrms metric.")
-    parser.add_argument("--obrms-bin", default="obrms")
+    pose_group = (
+        parser.add_mutually_exclusive_group(
+            required=True
+        )
+    )
+
+    pose_group.add_argument(
+        "--docked-pose",
+        type=Path,
+        help=(
+            "Single PDB pose for the legacy "
+            "coordinate-overlap workflow."
+        ),
+    )
+
+    pose_group.add_argument(
+        "--poses-sdf",
+        type=Path,
+        help=(
+            "Scored GNINA multi-pose SDF for "
+            "chemically mapped cognate redocking."
+        ),
+    )
+
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        type=Path,
+    )
+
+    parser.add_argument(
+        "--rmsd-threshold",
+        type=float,
+        default=2.0,
+    )
+
+    parser.add_argument(
+        "--reference-resname"
+    )
+    parser.add_argument(
+        "--reference-chain"
+    )
+    parser.add_argument(
+        "--reference-resseq"
+    )
+
+    parser.add_argument(
+        "--docked-resname"
+    )
+    parser.add_argument(
+        "--docked-chain"
+    )
+    parser.add_argument(
+        "--docked-resseq"
+    )
+
+    parser.add_argument(
+        "--no-openbabel",
+        action="store_true",
+        help=(
+            "Disable optional Open Babel obrms "
+            "for the legacy single-PDB workflow."
+        ),
+    )
+
+    parser.add_argument(
+        "--obrms-bin",
+        default="obrms",
+    )
 
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def main(
+    argv: list[str] | None = None,
+) -> int:
+    args = build_parser().parse_args(
+        argv
+    )
+
+    if args.poses_sdf is not None:
+        summary = evaluate_scored_pose_sdf(
+            reference_ligand=(
+                args.reference_ligand
+            ),
+            poses_sdf=args.poses_sdf,
+            rmsd_threshold=(
+                args.rmsd_threshold
+            ),
+        )
+
+        outputs = write_scored_pose_outputs(
+            summary,
+            args.output_dir,
+        )
+
+        top_pose = summary[
+            "top_cnn_pose"
+        ]
+        best_pose = summary[
+            "best_sampled_pose"
+        ]
+
+        print(
+            "[POSE_RECOVERY] "
+            f"top_cnn_rmsd="
+            f"{top_pose['heavy_atom_rmsd']:.3f} Å"
+        )
+        print(
+            "[POSE_RECOVERY] "
+            f"best_sampled_rmsd="
+            f"{best_pose['heavy_atom_rmsd']:.3f} Å"
+        )
+        print(
+            "[POSE_RECOVERY] "
+            f"sampling_pass="
+            f"{summary['sampling_pass']}"
+        )
+        print(
+            "[POSE_RECOVERY] "
+            f"ranking_pass="
+            f"{summary['ranking_pass']}"
+        )
+        print(
+            "[POSE_RECOVERY] "
+            f"overall={summary['overall']}"
+        )
+
+        for label, output_path in (
+            outputs.items()
+        ):
+            print(
+                f"[POSE_RECOVERY] "
+                f"{label}: {output_path}"
+            )
+
+        return 0
 
     metrics = compare_pose_recovery(
-        reference_ligand=args.reference_ligand,
+        reference_ligand=(
+            args.reference_ligand
+        ),
         docked_pose=args.docked_pose,
-        reference_resname=args.reference_resname,
-        reference_chain=args.reference_chain,
-        reference_resseq=args.reference_resseq,
-        docked_resname=args.docked_resname,
-        docked_chain=args.docked_chain,
-        docked_resseq=args.docked_resseq,
-        use_openbabel=not args.no_openbabel,
+        reference_resname=(
+            args.reference_resname
+        ),
+        reference_chain=(
+            args.reference_chain
+        ),
+        reference_resseq=(
+            args.reference_resseq
+        ),
+        docked_resname=(
+            args.docked_resname
+        ),
+        docked_chain=(
+            args.docked_chain
+        ),
+        docked_resseq=(
+            args.docked_resseq
+        ),
+        use_openbabel=(
+            not args.no_openbabel
+        ),
         obrms_bin=args.obrms_bin,
     )
 
-    outputs = write_outputs(metrics, args.output_dir)
+    outputs = write_outputs(
+        metrics,
+        args.output_dir,
+    )
 
-    print("[POSE_RECOVERY] Metrics:")
-    print(f"[POSE_RECOVERY] center_distance={metrics.center_distance:.3f} Å")
-    print(f"[POSE_RECOVERY] symmetric_nearest_neighbor_rmsd={metrics.symmetric_nearest_neighbor_rmsd:.3f} Å")
+    print(
+        "[POSE_RECOVERY] Metrics:"
+    )
+    print(
+        "[POSE_RECOVERY] "
+        f"center_distance="
+        f"{metrics.center_distance:.3f} Å"
+    )
+    print(
+        "[POSE_RECOVERY] "
+        f"symmetric_nearest_neighbor_rmsd="
+        f"{metrics.symmetric_nearest_neighbor_rmsd:.3f} Å"
+    )
+
     if metrics.openbabel_rmsd is not None:
-        print(f"[POSE_RECOVERY] openbabel_rmsd={metrics.openbabel_rmsd:.3f} Å")
-    if metrics.openbabel_minimized_rmsd is not None:
-        print(f"[POSE_RECOVERY] openbabel_minimized_rmsd={metrics.openbabel_minimized_rmsd:.3f} Å")
-    print(f"[POSE_RECOVERY] interpretation={metrics.interpretation}")
+        print(
+            "[POSE_RECOVERY] "
+            f"openbabel_rmsd="
+            f"{metrics.openbabel_rmsd:.3f} Å"
+        )
 
-    print("[POSE_RECOVERY] Outputs:")
-    for label, path in outputs.items():
-        print(f"[POSE_RECOVERY] {label}: {path}")
+    if (
+        metrics.openbabel_minimized_rmsd
+        is not None
+    ):
+        print(
+            "[POSE_RECOVERY] "
+            f"openbabel_minimized_rmsd="
+            f"{metrics.openbabel_minimized_rmsd:.3f} Å"
+        )
+
+    print(
+        "[POSE_RECOVERY] "
+        f"interpretation="
+        f"{metrics.interpretation}"
+    )
+
+    print(
+        "[POSE_RECOVERY] Outputs:"
+    )
+
+    for label, output_path in (
+        outputs.items()
+    ):
+        print(
+            f"[POSE_RECOVERY] "
+            f"{label}: {output_path}"
+        )
 
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

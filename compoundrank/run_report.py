@@ -859,6 +859,228 @@ def _render_pocket_selection_section(
     return lines
 
 
+
+def _render_pose_recovery_section(
+    output_dir: Path,
+) -> list[str]:
+    """Render an optional cognate-redocking benchmark section."""
+    summary_path = (
+        output_dir
+        / "pose_set_recovery_summary.json"
+    )
+    metrics_path = (
+        output_dir
+        / "pose_set_recovery_metrics.csv"
+    )
+    standalone_report_path = (
+        output_dir
+        / "pose_set_recovery_report.md"
+    )
+
+    summary = _load_json(summary_path)
+
+    if summary is None:
+        return []
+
+    top_pose_value = summary.get(
+        "top_cnn_pose",
+        {},
+    )
+    best_pose_value = summary.get(
+        "best_sampled_pose",
+        {},
+    )
+
+    top_pose = (
+        top_pose_value
+        if isinstance(top_pose_value, dict)
+        else {}
+    )
+    best_pose = (
+        best_pose_value
+        if isinstance(best_pose_value, dict)
+        else {}
+    )
+
+    def format_float(
+        value: Any,
+        *,
+        decimals: int = 3,
+    ) -> str:
+        number = _coerce_float(value)
+
+        if number is None:
+            return "unknown"
+
+        return f"{number:.{decimals}f}"
+
+    def yes_no_unknown(value: Any) -> str:
+        if value is True:
+            return "yes"
+        if value is False:
+            return "no"
+        return "unknown"
+
+    def filename_or_unknown(value: Any) -> str:
+        if value is None:
+            return "unknown"
+
+        text_value = str(value).strip()
+
+        if not text_value:
+            return "unknown"
+
+        return Path(text_value).name
+
+    threshold = _coerce_float(
+        summary.get(
+            "rmsd_threshold_angstrom"
+        )
+    )
+
+    threshold_text = (
+        f"{threshold:.3f} Å"
+        if threshold is not None
+        else "unknown"
+    )
+
+    mapping_failures = _coerce_int(
+        summary.get(
+            "mapping_failure_count"
+        )
+    )
+
+    lines = [
+        "## Cognate Pose-Recovery Benchmark",
+        "",
+        (
+            f"- Summary: "
+            f"`{_relative_or_original(output_dir, summary_path)}`"
+        ),
+        (
+            f"- Pose metrics: "
+            f"`{_relative_or_original(output_dir, metrics_path)}`"
+            if metrics_path.exists()
+            else "- Pose metrics: unavailable"
+        ),
+        (
+            f"- Standalone report: "
+            f"`{_relative_or_original(output_dir, standalone_report_path)}`"
+            if standalone_report_path.exists()
+            else "- Standalone report: unavailable"
+        ),
+        (
+            "- Reference ligand: "
+            f"`{filename_or_unknown(summary.get('reference_ligand'))}`"
+        ),
+        (
+            "- GNINA pose set: "
+            f"`{filename_or_unknown(summary.get('poses_sdf'))}`"
+        ),
+        (
+            "- RMSD method: "
+            f"{_format_value(summary.get('rmsd_method'))}"
+        ),
+        (
+            "- Complete atom mapping policy: "
+            f"{_format_value(summary.get('bond_order_mapping'))}"
+        ),
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+        (
+            "| Cognate RMSD threshold | "
+            f"{threshold_text} |"
+        ),
+        (
+            "| Chemically mapped poses | "
+            f"{_format_value(summary.get('mapped_pose_count'))} |"
+        ),
+        (
+            "| Mapping failures | "
+            f"{_format_value(summary.get('mapping_failure_count'))} |"
+        ),
+        (
+            "| Top CNN pose index | "
+            f"{_format_value(top_pose.get('pose_index'))} |"
+        ),
+        (
+            "| Top CNN score | "
+            f"{format_float(top_pose.get('cnnscore'), decimals=6)} |"
+        ),
+        (
+            "| Top CNN pose RMSD | "
+            f"{format_float(top_pose.get('heavy_atom_rmsd'))} Å |"
+        ),
+        (
+            "| Best sampled pose index | "
+            f"{_format_value(best_pose.get('pose_index'))} |"
+        ),
+        (
+            "| Best sampled pose RMSD | "
+            f"{format_float(best_pose.get('heavy_atom_rmsd'))} Å |"
+        ),
+        (
+            "| Sampling pass | "
+            f"{yes_no_unknown(summary.get('sampling_pass'))} |"
+        ),
+        (
+            "| Ranking pass | "
+            f"{yes_no_unknown(summary.get('ranking_pass'))} |"
+        ),
+        "",
+        "### Benchmark Interpretation",
+        "",
+        (
+            f"- Overall result: "
+            f"`{_format_value(summary.get('overall'))}`"
+        ),
+    ]
+
+    if (
+        mapping_failures is not None
+        and mapping_failures > 0
+    ):
+        lines.append(
+            "- Warning: one or more poses could not be "
+            "chemically mapped to the reference ligand."
+        )
+
+    if summary.get("sampling_pass") is False:
+        lines.append(
+            "- Sampling failure: no evaluated pose met "
+            "the configured cognate RMSD threshold."
+        )
+
+    if (
+        summary.get("sampling_pass") is True
+        and summary.get("ranking_pass") is False
+    ):
+        lines.append(
+            "- Ranking failure: GNINA sampled a qualifying "
+            "pose but did not rank one first."
+        )
+
+    if (
+        summary.get("sampling_pass") is True
+        and summary.get("ranking_pass") is True
+    ):
+        lines.append(
+            "- The highest-CNN-scoring pose also met the "
+            "configured cognate RMSD threshold."
+        )
+
+    lines += [
+        "",
+        "_This cognate-redocking benchmark evaluates pose "
+        "recovery under a known reference-complex condition. "
+        "It does not establish biological activity or clinical "
+        "efficacy._",
+        "",
+    ]
+
+    return lines
+
 def render_run_report(
     *,
     output_dir: Path,
@@ -877,6 +1099,10 @@ def render_run_report(
     lines.extend(_render_docking_section(hypotheses))
     lines.extend(_render_pocket_selection_section(output_dir))
     lines.extend(_render_docking_attempt_summary_section(output_dir))
+
+    lines += _render_pose_recovery_section(
+        output_dir
+    )
 
     lines += [
         "## Interpretation Limits",
