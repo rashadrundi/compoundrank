@@ -14,7 +14,15 @@ from .homolog_search import DEFAULT_API_URL, run_homolog_search
 from .interactions import summarize_interactions
 from .ligand import LigandRequest, prepare_ligand, read_manifest
 from .models import LigandResult
-from .pocket import build_pocket_definitions
+from .pocket import (
+    build_pocket_definitions,
+    write_pocket_definitions,
+)
+from .pocket_selection import (
+    rank_pocket_attempts,
+    summarize_pocket_attempt,
+    write_pocket_selection_summary,
+)
 from .receptor import prepare_receptor
 from .uncertainty import assess_uncertainty
 from .validity import filter_poses_with_posebusters
@@ -125,6 +133,7 @@ def run_pipeline(
     homolog_api_url: str = DEFAULT_API_URL,
     homolog_timeout_seconds: int = 7200,
     auto_retrieve_ligands: bool = False,
+    auto_retrieve_mode: str = "rules-only",
     auto_retrieve_max_candidates: int = 20,
     auto_retrieve_fetch_structures: bool = True,
     auto_retrieve_pubchem_timeout_seconds: int = 60,
@@ -184,19 +193,35 @@ def run_pipeline(
         retrieval_dir = output_dir / "stage4a_compound_retrieval"
 
         print(f"[COMPOUND_RETRIEVAL] Running Stage 4A into: {retrieval_dir}")
+        print(
+            f"[COMPOUND_RETRIEVAL] Retrieval mode: "
+            f"{auto_retrieve_mode}"
+        )
         retrieval_outputs = run_compound_retrieval(
             target_evidence_path=Path(target_evidence_output),
+            fasta_path=Path(fasta_path),
             homolog_summary_path=Path(homolog_summary_output) if homolog_summary_output else None,
             output_dir=retrieval_dir,
             max_candidates=auto_retrieve_max_candidates,
             fetch_structures=auto_retrieve_fetch_structures,
             pubchem_timeout_seconds=auto_retrieve_pubchem_timeout_seconds,
+            retrieval_mode=auto_retrieve_mode,
         )
 
         generated_manifest = retrieval_outputs["docking_manifest"]
         ligand_requests = read_manifest(generated_manifest)
 
         if not ligand_requests:
+            if auto_retrieve_mode == "generic-strict":
+                raise RuntimeError(
+                    "generic-strict retrieval produced no externally "
+                    "discovered dockable ligands. The local seed registry "
+                    "was correctly disabled. Inspect "
+                    f"{retrieval_outputs['generic_search_queries']} and "
+                    "connect an external ligand database backend before "
+                    "running docking."
+                )
+
             raise RuntimeError(
                 "Auto ligand retrieval produced no dockable ligand requests. "
                 f"Check {generated_manifest}"
@@ -257,8 +282,18 @@ def run_pipeline(
         for pocket in pockets:
             print(f"[POCKET] {pocket.pocket_id}: {pocket.source or pocket.mode}")
 
+        pocket_definitions_path = write_pocket_definitions(
+            output_dir / "pocket_definitions.json",
+            pockets,
+        )
+        print(
+            f"[POCKET] Definitions: "
+            f"{pocket_definitions_path}"
+        )
+
         ligand_results: list[LigandResult] = []
         docking_attempt_rows: list[dict[str, object]] = []
+        pocket_selection_rows: list[dict[str, object]] = []
 
         for request in ligand_requests:
             print(f"\n[LIGAND] Preparing {request.name}")
@@ -272,6 +307,7 @@ def run_pipeline(
 
             all_valid_records = []
             total_failures = 0
+            ligand_pocket_rows: list[dict[str, object]] = []
 
             for pocket in pockets:
                 print(f"\n[POCKET RUN] {ligand.name}: {pocket.pocket_id}")
@@ -332,6 +368,37 @@ def run_pipeline(
                         "best_raw_cnn_score": _best_cnn_score_text(raw_records),
                         "best_accepted_cnn_score": _best_cnn_score_text(valid_records),
                     }
+                )
+
+                ligand_pocket_rows.append(
+                    summarize_pocket_attempt(
+                        ligand_name=ligand.name,
+                        pocket=pocket,
+                        raw_records=raw_records,
+                        accepted_records=valid_records,
+                        rejected_pose_count=len(failures),
+                    )
+                )
+
+            ranked_pocket_rows = rank_pocket_attempts(
+                ligand_pocket_rows
+            )
+            pocket_selection_rows.extend(
+                ranked_pocket_rows
+            )
+
+            if ranked_pocket_rows:
+                selected_pocket = ranked_pocket_rows[0]
+                print(
+                    "[POCKET SELECTION] "
+                    f"{ligand.name}: "
+                    f"{selected_pocket['pocket_id']}; "
+                    f"fpocket rank="
+                    f"{selected_pocket['pocket_rank']}; "
+                    f"CNNscore="
+                    f"{selected_pocket['top_cnn_score']}; "
+                    f"score source="
+                    f"{selected_pocket['score_source']}"
                 )
 
             print(f"[VALIDITY] Failure records: {total_failures}")
@@ -415,6 +482,26 @@ def run_pipeline(
         )
         if attempt_summary_path is not None:
             print(f"[REPORT] Docking attempt summary: {attempt_summary_path}")
+
+        pocket_selection_paths = (
+            write_pocket_selection_summary(
+                output_dir,
+                pocket_selection_rows,
+            )
+        )
+
+        if pocket_selection_paths is not None:
+            selection_csv, selection_json = (
+                pocket_selection_paths
+            )
+            print(
+                "[REPORT] Pocket selection CSV: "
+                f"{selection_csv}"
+            )
+            print(
+                "[REPORT] Pocket selection JSON: "
+                f"{selection_json}"
+            )
 
         if homology_future is not None:
             print("\n[HOMOLOGY] Waiting for CPU homolog search to finish")

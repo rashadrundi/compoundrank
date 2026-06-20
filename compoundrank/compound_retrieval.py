@@ -27,10 +27,29 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from .chembl_search import (
+    read_fasta_sequence,
+    retrieve_chembl_candidates,
+)
+from .generic_ligand_search import generate_generic_queries
 from .ligand_rules import LIGAND_RETRIEVAL_RULES
 
 
 PUBCHEM_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+RETRIEVAL_MODES = ("rules-only", "hybrid", "generic-strict")
+
+
+def normalize_retrieval_mode(value: str) -> str:
+    """Validate and normalize the Stage 4A retrieval mode."""
+    mode = str(value).strip().lower()
+
+    if mode not in RETRIEVAL_MODES:
+        raise ValueError(
+            f"Unsupported retrieval mode: {value!r}. "
+            f"Expected one of: {', '.join(RETRIEVAL_MODES)}"
+        )
+
+    return mode
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -172,6 +191,115 @@ def candidate_key(candidate: dict[str, Any]) -> str:
     return str(candidate.get("compound_name", "")).strip().lower()
 
 
+def merge_ligand_candidate_sets(
+    candidate_sets: list[list[dict[str, Any]]],
+    *,
+    max_candidates: int,
+) -> list[dict[str, Any]]:
+    """Merge local and external candidates without hiding provenance."""
+    candidates_by_key: dict[str, dict[str, Any]] = {}
+
+    for candidate_set in candidate_sets:
+        for candidate in candidate_set:
+            key = candidate_key(candidate)
+
+            if not key:
+                key = str(
+                    candidate.get("chembl_molecule_id")
+                    or candidate.get("pubchem_cid")
+                    or ""
+                ).strip().lower()
+
+            if not key:
+                continue
+
+            existing = candidates_by_key.get(key)
+            if existing is None:
+                candidates_by_key[key] = dict(candidate)
+                continue
+
+            existing_is_seed = bool(existing.get("hardcoded_seed"))
+            candidate_is_seed = bool(candidate.get("hardcoded_seed"))
+
+            # Prefer measured external evidence over a local seed when the
+            # same named compound appears through both routes.
+            if existing_is_seed and not candidate_is_seed:
+                replacement = dict(candidate)
+                replacement["additional_provenance"] = [
+                    {
+                        "discovery_source": existing.get(
+                            "discovery_source"
+                        ),
+                        "retrieval_rule_id": existing.get(
+                            "retrieval_rule_id"
+                        ),
+                        "evidence_level": existing.get(
+                            "evidence_level"
+                        ),
+                    }
+                ]
+                candidates_by_key[key] = replacement
+                continue
+
+            if not existing_is_seed and candidate_is_seed:
+                existing.setdefault(
+                    "additional_provenance",
+                    [],
+                ).append(
+                    {
+                        "discovery_source": candidate.get(
+                            "discovery_source"
+                        ),
+                        "retrieval_rule_id": candidate.get(
+                            "retrieval_rule_id"
+                        ),
+                        "evidence_level": candidate.get(
+                            "evidence_level"
+                        ),
+                    }
+                )
+                continue
+
+            existing_pchembl = float(
+                existing.get("pchembl_value") or 0
+            )
+            candidate_pchembl = float(
+                candidate.get("pchembl_value") or 0
+            )
+
+            if candidate_pchembl > existing_pchembl:
+                candidates_by_key[key] = dict(candidate)
+
+    candidates = list(candidates_by_key.values())
+
+    evidence_priority = {
+        "strong": 0,
+        "moderate": 1,
+        "weak": 2,
+        "exploratory": 3,
+    }
+
+    candidates.sort(
+        key=lambda item: (
+            bool(item.get("hardcoded_seed")),
+            evidence_priority.get(
+                str(item.get("evidence_level") or "exploratory"),
+                3,
+            ),
+            -float(item.get("pchembl_value") or 0),
+            str(item.get("compound_name") or "").lower(),
+        )
+    )
+
+    if max_candidates > 0:
+        candidates = candidates[:max_candidates]
+
+    for rank, candidate in enumerate(candidates, start=1):
+        candidate["retrieval_rank"] = rank
+
+    return candidates
+
+
 def make_candidate(
     *,
     compound: dict[str, Any],
@@ -198,6 +326,8 @@ def make_candidate(
         "compound_name": compound_name,
         "retrieval_rank": retrieval_rank,
         "design_status": compound.get("design_status", "known_inhibitor"),
+        "discovery_source": "local_rule_registry",
+        "hardcoded_seed": True,
         "retrieval_route": "domain_family_rule",
         "retrieval_rule_id": rule.get("rule_id"),
         "retrieval_rule_label": rule.get("rule_label"),
@@ -246,8 +376,21 @@ def build_ligand_candidates(
     homolog_summary: dict[str, Any] | None = None,
     *,
     max_candidates: int = 20,
+    retrieval_mode: str = "rules-only",
 ) -> list[dict[str, Any]]:
-    """Build candidate ligand packets from target evidence and optional homology summary."""
+    """Build candidate ligand packets under the selected retrieval mode.
+
+    rules-only and hybrid may use the local seed registry.
+
+    generic-strict prohibits all local target-specific seed compounds.
+    Until an external database backend is connected, strict mode
+    intentionally returns an empty candidate collection.
+    """
+    mode = normalize_retrieval_mode(retrieval_mode)
+
+    if mode == "generic-strict":
+        return []
+
     evidence_blob = flatten_text(
         {"target_evidence": target_evidence, "homolog_summary": homolog_summary or {}}
     )
@@ -410,6 +553,310 @@ def fetch_candidate_structures_from_pubchem(
         time.sleep(sleep_seconds)
 
     return candidates
+
+
+
+CHEMBL_STRUCTURE_BASE = (
+    "https://www.ebi.ac.uk/chembl/api/data"
+)
+
+
+def _safe_structure_filename(value: str) -> str:
+    text = str(value or "").strip().lower()
+
+    safe = "".join(
+        character
+        if character.isalnum()
+        else "_"
+        for character in text
+    )
+
+    safe = "_".join(
+        part
+        for part in safe.split("_")
+        if part
+    )
+
+    return safe or "unnamed_ligand"
+
+
+def _download_url_bytes(
+    url: str,
+    *,
+    accept: str,
+    timeout_seconds: int,
+) -> bytes:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": accept,
+            "User-Agent": (
+                "CompoundRank-stage4A/0.4 "
+                "educational-research-use"
+            ),
+        },
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=timeout_seconds,
+    ) as response:
+        return response.read()
+
+
+def _hydrate_one_chembl_candidate(
+    candidate: dict[str, Any],
+    *,
+    output_dir: Path,
+    timeout_seconds: int,
+) -> None:
+    chembl_id = str(
+        candidate.get("chembl_molecule_id")
+        or ""
+    ).strip()
+
+    if not chembl_id:
+        raise ValueError(
+            "Candidate has no chembl_molecule_id."
+        )
+
+    ligand_dir = output_dir / "retrieved_ligands"
+    ligand_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    encoded_id = urllib.parse.quote(
+        chembl_id,
+        safe="",
+    )
+
+    metadata_url = (
+        f"{CHEMBL_STRUCTURE_BASE}/molecule/"
+        f"{encoded_id}.json"
+    )
+    sdf_url = (
+        f"{CHEMBL_STRUCTURE_BASE}/molecule/"
+        f"{encoded_id}.sdf"
+    )
+
+    metadata_warning = None
+
+    try:
+        metadata_bytes = _download_url_bytes(
+            metadata_url,
+            accept="application/json",
+            timeout_seconds=timeout_seconds,
+        )
+
+        metadata = json.loads(
+            metadata_bytes.decode(
+                "utf-8",
+                errors="replace",
+            )
+        )
+
+        if isinstance(metadata, dict):
+            preferred_name = str(
+                metadata.get("pref_name")
+                or ""
+            ).strip()
+
+            current_name = str(
+                candidate.get("compound_name")
+                or ""
+            ).strip()
+
+            if (
+                preferred_name
+                and (
+                    not current_name
+                    or current_name.upper()
+                    == chembl_id.upper()
+                )
+            ):
+                candidate["compound_name"] = (
+                    preferred_name
+                )
+
+            structures = (
+                metadata.get("molecule_structures")
+                or {}
+            )
+
+            if isinstance(structures, dict):
+                smiles = structures.get(
+                    "canonical_smiles"
+                )
+                inchi = structures.get(
+                    "standard_inchi"
+                )
+                inchi_key = structures.get(
+                    "standard_inchi_key"
+                )
+
+                if smiles:
+                    candidate[
+                        "canonical_smiles"
+                    ] = smiles
+                    candidate["smiles"] = smiles
+
+                if inchi:
+                    candidate[
+                        "standard_inchi"
+                    ] = inchi
+
+                if inchi_key:
+                    candidate[
+                        "inchi_key"
+                    ] = inchi_key
+
+            candidate["molecule_type"] = (
+                metadata.get("molecule_type")
+            )
+            candidate["max_phase"] = (
+                metadata.get("max_phase")
+            )
+
+    except Exception as exc:  # noqa: BLE001
+        metadata_warning = str(exc)
+
+    sdf_bytes = _download_url_bytes(
+        sdf_url,
+        accept="chemical/x-mdl-sdfile",
+        timeout_seconds=timeout_seconds,
+    )
+
+    if len(sdf_bytes) < 100:
+        raise ValueError(
+            "ChEMBL returned an unexpectedly "
+            "small SDF response."
+        )
+
+    if b"M  END" not in sdf_bytes:
+        preview = sdf_bytes[:200].decode(
+            "utf-8",
+            errors="replace",
+        )
+
+        raise ValueError(
+            "ChEMBL response does not appear to "
+            f"be an SDF record: {preview!r}"
+        )
+
+    filename = (
+        _safe_structure_filename(chembl_id)
+        + ".sdf"
+    )
+    sdf_path = ligand_dir / filename
+    sdf_path.write_bytes(sdf_bytes)
+
+    candidate["local_sdf_path"] = str(
+        sdf_path
+    )
+    candidate["structure_source"] = (
+        "ChEMBL molecule SDF endpoint"
+    )
+    candidate["structure_fetch_status"] = (
+        "fetched"
+    )
+    candidate["structure_fetch_error"] = None
+    candidate["structure_metadata_warning"] = (
+        metadata_warning
+    )
+
+    databases = candidate.setdefault(
+        "source_databases",
+        [],
+    )
+
+    if "ChEMBL" not in databases:
+        databases.append("ChEMBL")
+
+
+def fetch_candidate_structures_by_provenance_v2(
+    candidates: list[dict[str, Any]],
+    *,
+    output_dir: Path,
+    chembl_timeout_seconds: int = 60,
+    pubchem_timeout_seconds: int = 60,
+) -> list[dict[str, Any]]:
+    """Hydrate structures using stable source identifiers.
+
+    ChEMBL-discovered candidates use their ChEMBL molecule IDs.
+    Candidates without ChEMBL IDs retain the older PubChem route.
+    """
+    pubchem_candidates: list[
+        dict[str, Any]
+    ] = []
+
+    for candidate in candidates:
+        if not candidate.get(
+            "selected_for_docking",
+            True,
+        ):
+            continue
+
+        chembl_id = str(
+            candidate.get("chembl_molecule_id")
+            or ""
+        ).strip()
+
+        if not chembl_id:
+            pubchem_candidates.append(
+                candidate
+            )
+            continue
+
+        try:
+            _hydrate_one_chembl_candidate(
+                candidate,
+                output_dir=output_dir,
+                timeout_seconds=(
+                    chembl_timeout_seconds
+                ),
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            candidate["local_sdf_path"] = None
+            candidate["structure_source"] = (
+                "ChEMBL molecule SDF endpoint"
+            )
+            candidate[
+                "structure_fetch_status"
+            ] = "failed"
+            candidate[
+                "structure_fetch_error"
+            ] = str(exc)
+
+    if pubchem_candidates:
+        fetch_candidate_structures_from_pubchem(
+            pubchem_candidates,
+            output_dir=output_dir,
+            timeout_seconds=(
+                pubchem_timeout_seconds
+            ),
+        )
+
+    return candidates
+
+
+
+
+def fetch_candidate_structures(
+    candidates: list[dict[str, Any]],
+    *,
+    output_dir: Path,
+    chembl_timeout_seconds: int = 60,
+    pubchem_timeout_seconds: int = 60,
+) -> list[dict[str, Any]]:
+    """Backward-compatible structure hydration entry point."""
+    return fetch_candidate_structures_by_provenance_v2(
+        candidates,
+        output_dir=output_dir,
+        chembl_timeout_seconds=chembl_timeout_seconds,
+        pubchem_timeout_seconds=pubchem_timeout_seconds,
+    )
 
 
 def write_candidate_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
@@ -585,12 +1032,18 @@ def run_compound_retrieval(
     *,
     target_evidence_path: Path,
     output_dir: Path,
+    fasta_path: Path | None = None,
     homolog_summary_path: Path | None = None,
     max_candidates: int = 20,
     fetch_structures: bool = True,
     pubchem_timeout_seconds: int = 60,
+    retrieval_mode: str = "rules-only",
+    chembl_timeout_seconds: int = 60,
+    chembl_max_targets: int = 5,
+    chembl_activities_per_target: int = 200,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    retrieval_mode = normalize_retrieval_mode(retrieval_mode)
 
     target_evidence = load_json(target_evidence_path)
     homolog_summary = (
@@ -599,25 +1052,144 @@ def run_compound_retrieval(
         else None
     )
 
-    candidates = build_ligand_candidates(
-        target_evidence,
-        homolog_summary,
+    normalized_context = target_context(target_evidence)
+    generic_queries = generate_generic_queries(normalized_context)
+
+    query_sequence = (
+        read_fasta_sequence(fasta_path)
+        if fasta_path is not None
+        else None
+    )
+
+    local_candidates: list[dict[str, Any]] = []
+    chembl_candidates: list[dict[str, Any]] = []
+
+    chembl_trace: dict[str, Any] = {
+        "backend": "ChEMBL",
+        "enabled": False,
+        "search_terms": [],
+        "target_count": 0,
+        "targets": [],
+        "activity_count": 0,
+        "accepted_activity_count": 0,
+        "candidate_count": 0,
+    }
+
+    if retrieval_mode in {"rules-only", "hybrid"}:
+        local_candidates = build_ligand_candidates(
+            target_evidence,
+            homolog_summary,
+            max_candidates=max_candidates,
+            retrieval_mode="rules-only",
+        )
+
+    if retrieval_mode in {"generic-strict", "hybrid"}:
+        chembl_candidates, chembl_trace = (
+            retrieve_chembl_candidates(
+                generic_queries,
+                target_context=normalized_context,
+                query_sequence=query_sequence,
+                max_targets=chembl_max_targets,
+                activities_per_target=(
+                    chembl_activities_per_target
+                ),
+                max_candidates=max_candidates,
+                timeout_seconds=chembl_timeout_seconds,
+            )
+        )
+        chembl_trace["enabled"] = True
+
+    candidates = merge_ligand_candidate_sets(
+        [chembl_candidates, local_candidates],
         max_candidates=max_candidates,
     )
 
+    hardcoded_candidate_count = sum(
+        bool(candidate.get("hardcoded_seed"))
+        for candidate in candidates
+    )
+
+    if retrieval_mode == "generic-strict" and hardcoded_candidate_count:
+        raise RuntimeError(
+            "generic-strict provenance violation: a hard-coded seed "
+            "candidate entered the candidate set"
+        )
+
     if fetch_structures and candidates:
-        candidates = fetch_candidate_structures_from_pubchem(
-            candidates,
-            output_dir=output_dir,
-            timeout_seconds=pubchem_timeout_seconds,
+        candidates = (
+            fetch_candidate_structures_by_provenance_v2(
+                candidates,
+                output_dir=output_dir,
+                chembl_timeout_seconds=(
+                    chembl_timeout_seconds
+                ),
+                pubchem_timeout_seconds=(
+                    pubchem_timeout_seconds
+                ),
+            )
         )
 
     candidate_json = output_dir / "ligand_candidates.json"
     candidate_csv = output_dir / "candidate_ligands.csv"
     docking_manifest = output_dir / "docking_manifest.csv"
     report_path = output_dir / "ligand_search_report.md"
+    query_plan_path = output_dir / "generic_search_queries.json"
+    metadata_path = output_dir / "retrieval_metadata.json"
+    chembl_trace_path = output_dir / "chembl_search_trace.json"
 
     write_json(candidate_json, {"candidates": candidates})
+    write_json(chembl_trace_path, chembl_trace)
+    write_json(
+        query_plan_path,
+        {
+            "retrieval_mode": retrieval_mode,
+            "target_context": normalized_context,
+            "queries": generic_queries,
+        },
+    )
+    write_json(
+        metadata_path,
+        {
+            "retrieval_mode": retrieval_mode,
+            "local_rule_registry_enabled": (
+                retrieval_mode in {"rules-only", "hybrid"}
+            ),
+            "external_database_backends_enabled": (
+                ["ChEMBL"]
+                if retrieval_mode in {
+                    "generic-strict",
+                    "hybrid",
+                }
+                else []
+            ),
+            "manual_compounds_supplied": False,
+            "candidate_count": len(candidates),
+            "local_candidate_count": len(local_candidates),
+            "chembl_candidate_count": len(chembl_candidates),
+            "chembl_target_count": chembl_trace.get(
+                "target_count",
+                0,
+            ),
+            "chembl_activity_count": chembl_trace.get(
+                "activity_count",
+                0,
+            ),
+            "hardcoded_candidates_used": hardcoded_candidate_count,
+            "generic_query_count": len(generic_queries),
+            "query_sequence_supplied": (
+                query_sequence is not None
+            ),
+            "query_sequence_length": (
+                len(query_sequence)
+                if query_sequence is not None
+                else 0
+            ),
+            "strict_provenance_passed": (
+                retrieval_mode != "generic-strict"
+                or hardcoded_candidate_count == 0
+            ),
+        },
+    )
     write_candidate_csv(candidate_csv, candidates)
     write_docking_manifest(docking_manifest, candidates)
 
@@ -633,16 +1205,52 @@ def run_compound_retrieval(
         "candidate_ligands_csv": candidate_csv,
         "docking_manifest": docking_manifest,
         "ligand_search_report": report_path,
+        "generic_search_queries": query_plan_path,
+        "retrieval_metadata": metadata_path,
+        "chembl_search_trace": chembl_trace_path,
     }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Stage 4A compound retrieval from target evidence.")
     parser.add_argument("--target-evidence", required=True, type=Path)
+    parser.add_argument(
+        "--fasta",
+        type=Path,
+        default=None,
+        help=(
+            "Optional submitted protein FASTA for sequence-supported "
+            "ChEMBL target resolution."
+        ),
+    )
     parser.add_argument("--homolog-summary", type=Path, default=None)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--max-candidates", type=int, default=20)
     parser.add_argument("--pubchem-timeout-seconds", type=int, default=60)
+    parser.add_argument(
+        "--chembl-timeout-seconds",
+        type=int,
+        default=60,
+    )
+    parser.add_argument(
+        "--chembl-max-targets",
+        type=int,
+        default=5,
+    )
+    parser.add_argument(
+        "--chembl-activities-per-target",
+        type=int,
+        default=200,
+    )
+    parser.add_argument(
+        "--retrieval-mode",
+        choices=RETRIEVAL_MODES,
+        default="rules-only",
+        help=(
+            "rules-only uses local seed compounds; hybrid permits local "
+            "and external retrieval; generic-strict prohibits local seeds."
+        ),
+    )
     parser.add_argument(
         "--no-fetch-structures",
         action="store_true",
@@ -656,11 +1264,18 @@ def main(argv: list[str] | None = None) -> int:
 
     outputs = run_compound_retrieval(
         target_evidence_path=args.target_evidence,
+        fasta_path=args.fasta,
         homolog_summary_path=args.homolog_summary,
         output_dir=args.output_dir,
         max_candidates=args.max_candidates,
         fetch_structures=not args.no_fetch_structures,
         pubchem_timeout_seconds=args.pubchem_timeout_seconds,
+        retrieval_mode=args.retrieval_mode,
+        chembl_timeout_seconds=args.chembl_timeout_seconds,
+        chembl_max_targets=args.chembl_max_targets,
+        chembl_activities_per_target=(
+            args.chembl_activities_per_target
+        ),
     )
 
     print("[COMPOUND_RETRIEVAL] Outputs:")

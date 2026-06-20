@@ -47,6 +47,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--auto-retrieve-max-candidates", type=int, default=6)
     parser.add_argument(
+        "--auto-retrieve-mode",
+        choices=("rules-only", "hybrid", "generic-strict"),
+        default="rules-only",
+        help=(
+            "Select Stage 4A retrieval behavior. generic-strict disables "
+            "all local target-specific seed compounds."
+        ),
+    )
+    parser.add_argument(
         "--auto-retrieve-no-fetch-structures",
         action="store_true",
         help="Run Stage 4A without PubChem structure fetching. Usually not suitable for docking.",
@@ -245,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         homolog_api_url=args.homolog_api_url,
         homolog_timeout_seconds=args.homolog_timeout_seconds,
         auto_retrieve_ligands=args.auto_retrieve_ligands,
+        auto_retrieve_mode=args.auto_retrieve_mode,
         auto_retrieve_max_candidates=args.auto_retrieve_max_candidates,
         auto_retrieve_fetch_structures=not args.auto_retrieve_no_fetch_structures,
         auto_retrieve_pubchem_timeout_seconds=args.auto_retrieve_pubchem_timeout_seconds,

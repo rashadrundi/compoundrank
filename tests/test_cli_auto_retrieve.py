@@ -14,12 +14,14 @@ class CliAutoRetrieveTests(unittest.TestCase):
                 "--data-root", "/tmp/data",
                 "--fasta", "/tmp/protein.faa",
                 "--auto-retrieve-ligands",
+                "--auto-retrieve-mode", "generic-strict",
                 "--auto-retrieve-max-candidates", "4",
                 "--auto-retrieve-no-fetch-structures",
             ]
         )
 
         self.assertTrue(args.auto_retrieve_ligands)
+        self.assertEqual(args.auto_retrieve_mode, "generic-strict")
         self.assertEqual(args.auto_retrieve_max_candidates, 4)
         self.assertTrue(args.auto_retrieve_no_fetch_structures)
 
@@ -53,6 +55,7 @@ class CliAutoRetrieveTests(unittest.TestCase):
                         "--data-root", str(tmp / "data"),
                         "--fasta", str(fasta),
                         "--auto-retrieve-ligands",
+                        "--auto-retrieve-mode", "generic-strict",
                         "--auto-retrieve-max-candidates", "3",
                     ]
                 )
@@ -60,6 +63,10 @@ class CliAutoRetrieveTests(unittest.TestCase):
             kwargs = mocked.call_args.kwargs
             self.assertEqual(kwargs["ligand_requests"], [])
             self.assertTrue(kwargs["auto_retrieve_ligands"])
+            self.assertEqual(
+                kwargs["auto_retrieve_mode"],
+                "generic-strict",
+            )
             self.assertEqual(kwargs["auto_retrieve_max_candidates"], 3)
 
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -70,10 +71,13 @@ def _pocket_score(pocket: dict[str, Any]) -> float:
 
 
 def _coordinate_file_for_pocket(out_dir: Path, pocket_number: int) -> Path:
+    # The fpocket alpha-sphere vertices describe the pocket
+    # geometry directly. Prefer them over nearby receptor atoms so
+    # box construction matches the validated blind-redocking workflow.
     candidates = [
-        out_dir / "pockets" / f"pocket{pocket_number}_atm.pdb",
         out_dir / "pockets" / f"pocket{pocket_number}_vert.pqr",
         out_dir / "pockets" / f"pocket{pocket_number}_vert.pdb",
+        out_dir / "pockets" / f"pocket{pocket_number}_atm.pdb",
     ]
     pocket_file = next((path for path in candidates if path.is_file()), None)
     if pocket_file is None:
@@ -87,14 +91,100 @@ def _box_from_pocket_file(
     pocket_file: Path,
     *,
     padding: float,
+    minimum_size: float = 20.0,
 ) -> tuple[np.ndarray, np.ndarray]:
+    if padding < 0:
+        raise ValueError("Pocket padding cannot be negative")
+
+    if minimum_size <= 0:
+        raise ValueError(
+            "Pocket minimum size must be greater than zero"
+        )
+
     coordinates = _read_pdb_coordinates(pocket_file)
     minimum = coordinates.min(axis=0)
     maximum = coordinates.max(axis=0)
     center = (minimum + maximum) / 2.0
     size = maximum - minimum + 2.0 * padding
-    size = np.maximum(size, np.asarray([12.0, 12.0, 12.0]))
+
+    size = np.maximum(
+        size,
+        np.asarray(
+            [minimum_size, minimum_size, minimum_size],
+            dtype=float,
+        ),
+    )
+
     return center, size
+
+
+
+def pocket_definition_to_dict(
+    pocket: PocketDefinition,
+) -> dict[str, Any]:
+    return {
+        "pocket_id": pocket.pocket_id,
+        "pocket_rank": pocket.pocket_rank,
+        "mode": pocket.mode,
+        "source": pocket.source,
+        "fpocket_score": pocket.fpocket_score,
+        "center_x": pocket.center_x,
+        "center_y": pocket.center_y,
+        "center_z": pocket.center_z,
+        "size_x": pocket.size_x,
+        "size_y": pocket.size_y,
+        "size_z": pocket.size_z,
+        "autobox_ligand": (
+            str(pocket.autobox_ligand)
+            if pocket.autobox_ligand is not None
+            else None
+        ),
+    }
+
+
+def write_pocket_definitions(
+    output_path: Path,
+    pockets: Iterable[PocketDefinition],
+) -> Path:
+    pocket_list = list(pockets)
+
+    payload = {
+        "pocket_count": len(pocket_list),
+        "ranking_method": (
+            "fpocket score descending when fpocket is used"
+        ),
+        "reference_ligand_used_for_selection": False,
+        "box_geometry": {
+            "coordinate_source_preference": [
+                "fpocket vertex PQR",
+                "fpocket vertex PDB",
+                "fpocket atom PDB",
+            ],
+            "default_padding_angstrom_per_side": 4.0,
+            "minimum_dimension_angstrom": 20.0,
+        },
+        "pockets": [
+            pocket_definition_to_dict(pocket)
+            for pocket in pocket_list
+        ],
+    }
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_path.write_text(
+        json.dumps(
+            payload,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    return output_path
 
 
 def detect_fpocket_boxes(
