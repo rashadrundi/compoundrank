@@ -519,7 +519,7 @@ def run_cpu_analysis(upload_file) -> Dict[str, Any]:
     → run CDD
     → run InterPro
     → run VOGDB
-    → write cpu_manifest.json
+    → write CPU manifest and local-workflow handoff
     → return JSON response
     """
 
@@ -535,13 +535,92 @@ def run_cpu_analysis(upload_file) -> Dict[str, Any]:
     interpro_result = run_interpro(job_dir, fasta_path)
     vogdb_result = run_vogdb(job_dir, fasta_path)
 
-    tool_results = [cdd_result, interpro_result, vogdb_result]
+    tool_results = [
+        cdd_result,
+        interpro_result,
+        vogdb_result,
+    ]
+
+    manifest_path = job_dir / "cpu_manifest.json"
+    handoff_path = job_dir / "cpu_to_local_handoff.json"
+
+    file_map = {
+        "input_fasta": str(fasta_path),
+        "manifest": str(manifest_path),
+        "local_handoff_json": str(handoff_path),
+
+        "cdd_csv": cdd_result.get("output_file"),
+        "cdd_log": cdd_result.get("log_file"),
+
+        "interpro_tsv": interpro_result.get("output_file"),
+        "interpro_log": interpro_result.get("log_file"),
+        "interpro_gff3": str(
+            job_dir
+            / "annotation"
+            / "interpro"
+            / "nextflow_out"
+            / "protein.fasta.gff3"
+        ),
+        "interpro_json": str(
+            job_dir
+            / "annotation"
+            / "interpro"
+            / "nextflow_out"
+            / "protein.fasta.json"
+        ),
+        "interpro_jsonl": str(
+            job_dir
+            / "annotation"
+            / "interpro"
+            / "nextflow_out"
+            / "protein.fasta.jsonl"
+        ),
+        "interpro_xml": str(
+            job_dir
+            / "annotation"
+            / "interpro"
+            / "nextflow_out"
+            / "protein.fasta.xml"
+        ),
+
+        "vogdb_csv": vogdb_result.get("output_file"),
+        "vogdb_log": vogdb_result.get("log_file"),
+        "vogdb_tblout": str(
+            job_dir
+            / "homologs"
+            / "vogdb_raw"
+            / "vogdb.tblout"
+        ),
+        "vogdb_domtblout": str(
+            job_dir
+            / "homologs"
+            / "vogdb_raw"
+            / "vogdb.domtblout"
+        ),
+        "vogdb_hmmscan_txt": str(
+            job_dir
+            / "homologs"
+            / "vogdb_raw"
+            / "vogdb.hmmscan.txt"
+        ),
+    }
+
+    result_counts = {
+        "cdd": len(cdd_result.get("rows", [])),
+        "interpro": len(interpro_result.get("rows", [])),
+        "vogdb": len(vogdb_result.get("rows", [])),
+    }
 
     response = {
         "job_id": job_id,
-        "status": "complete"
-        if all(result["status"] == "complete" for result in tool_results)
-        else "partial_or_failed",
+        "status": (
+            "complete"
+            if all(
+                result["status"] == "complete"
+                for result in tool_results
+            )
+            else "partial_or_failed"
+        ),
         "paths": {
             "repo_root": str(REPO_ROOT),
             "deploy_root": str(DEPLOY_ROOT),
@@ -552,29 +631,67 @@ def run_cpu_analysis(upload_file) -> Dict[str, Any]:
         },
         "fasta_file": str(fasta_path),
         "job_dir": str(job_dir),
+        "manifest_file": str(manifest_path),
 
-        # Full tool objects, including output_file/log_file/status/rows/errors
         "cdd": cdd_result,
         "interpro": interpro_result,
         "vogdb": vogdb_result,
 
-        # Clean top-level results section
         "results": {
             "cdd": cdd_result.get("rows", []),
             "interpro": interpro_result.get("rows", []),
             "vogdb": vogdb_result.get("rows", []),
         },
 
-        "result_counts": {
-            "cdd": len(cdd_result.get("rows", [])),
-            "interpro": len(interpro_result.get("rows", [])),
-            "vogdb": len(vogdb_result.get("rows", [])),
+        "result_counts": result_counts,
+        "files": file_map,
+    }
+
+    handoff = {
+        "job_id": job_id,
+        "status": response["status"],
+        "purpose": "local_gpu_workflow_input",
+        "requested_local_steps": [
+            "colabfold",
+            "fpocket",
+            "gnina",
+        ],
+        "input": {
+            "fasta_file": str(fasta_path),
+        },
+        "annotations": response["results"],
+        "result_counts": result_counts,
+        "cpu_files": file_map,
+        "notes": {
+            "fpocket_location": "local_gpu_workstation",
+            "fpocket_reason": (
+                "fpocket requires the predicted or supplied PDB "
+                "structure and should run after ColabFold and "
+                "before GNINA."
+            ),
+            "cpu_server_steps_completed": [
+                "cdd",
+                "interpro",
+                "vogdb",
+            ],
+            "gpu_local_steps_pending": [
+                "colabfold",
+                "fpocket",
+                "gnina",
+            ],
         },
     }
 
-    manifest_path = job_dir / "cpu_manifest.json"
-    manifest_path.write_text(json.dumps(response, indent=2), encoding="utf-8")
+    response["local_handoff"] = handoff
 
-    response["manifest_file"] = str(manifest_path)
+    handoff_path.write_text(
+        json.dumps(handoff, indent=2),
+        encoding="utf-8",
+    )
+
+    manifest_path.write_text(
+        json.dumps(response, indent=2),
+        encoding="utf-8",
+    )
 
     return response
