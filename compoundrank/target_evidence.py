@@ -521,6 +521,326 @@ def _confidence(
     return "unknown"
 
 
+def _annotation_tool_statuses(
+    summary: dict[str, Any],
+) -> dict[str, str]:
+    tool_names = (
+        "cdd",
+        "interpro",
+        "vogdb",
+    )
+
+    statuses: dict[str, str] = {}
+
+    explicit_statuses = summary.get(
+        "tool_statuses",
+        {},
+    )
+
+    tools = summary.get(
+        "tools",
+        {},
+    )
+
+    for tool_name in tool_names:
+        status = None
+
+        if isinstance(explicit_statuses, dict):
+            explicit_status = explicit_statuses.get(
+                tool_name
+            )
+
+            if explicit_status is not None:
+                status = str(
+                    explicit_status
+                ).strip().lower()
+
+        if status is None and isinstance(
+            tools,
+            dict,
+        ):
+            tool_result = tools.get(
+                tool_name,
+                {},
+            )
+
+            if isinstance(tool_result, dict):
+                tool_status = tool_result.get(
+                    "status"
+                )
+
+                if tool_status is not None:
+                    status = str(
+                        tool_status
+                    ).strip().lower()
+
+        statuses[tool_name] = (
+            status or "unknown"
+        )
+
+    return statuses
+
+
+def _annotation_tool_errors(
+    summary: dict[str, Any],
+) -> dict[str, str]:
+    errors: dict[str, str] = {}
+
+    explicit_errors = summary.get(
+        "tool_errors",
+        {},
+    )
+
+    if isinstance(explicit_errors, dict):
+        for tool_name, error in (
+            explicit_errors.items()
+        ):
+            if error:
+                errors[str(tool_name)] = str(
+                    error
+                )
+
+    tools = summary.get(
+        "tools",
+        {},
+    )
+
+    if isinstance(tools, dict):
+        for tool_name, tool_result in (
+            tools.items()
+        ):
+            if not isinstance(
+                tool_result,
+                dict,
+            ):
+                continue
+
+            error = tool_result.get("error")
+
+            if error and tool_name not in errors:
+                errors[str(tool_name)] = str(
+                    error
+                )
+
+    return errors
+
+
+def _summarize_tool_error(
+    error: Any,
+    *,
+    maximum_length: int = 300,
+) -> str | None:
+    if not error:
+        return None
+
+    lines = [
+        line.strip()
+        for line in str(error).splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return None
+
+    preferred_fragments = (
+        "bad file format",
+        "no such file",
+        "permission denied",
+        "out of memory",
+        "timed out",
+        "timeout",
+        "command not found",
+        "exit code:",
+        "runtimeerror:",
+        "error:",
+    )
+
+    selected = None
+
+    for line in reversed(lines):
+        lowered = line.lower()
+
+        if any(
+            fragment in lowered
+            for fragment in preferred_fragments
+        ):
+            selected = line
+            break
+
+    if selected is None:
+        selected = lines[-1]
+
+    if len(selected) > maximum_length:
+        return (
+            selected[: maximum_length - 3]
+            + "..."
+        )
+
+    return selected
+
+
+def _annotation_source_block(
+    summary: dict[str, Any],
+    *,
+    source_fasta: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "job_id": summary.get("job_id"),
+        "status": summary.get("status"),
+        "source_fasta": source_fasta,
+        "result_counts": summary.get(
+            "result_counts",
+            {},
+        ),
+        "tool_statuses": (
+            _annotation_tool_statuses(
+                summary
+            )
+        ),
+        "tool_errors": (
+            _annotation_tool_errors(
+                summary
+            )
+        ),
+    }
+
+
+def _annotation_limitations(
+    summary: dict[str, Any],
+) -> list[str]:
+    statuses = _annotation_tool_statuses(
+        summary
+    )
+    errors = _annotation_tool_errors(
+        summary
+    )
+
+    display_names = {
+        "cdd": "CDD",
+        "interpro": "InterPro",
+        "vogdb": "VOGDB",
+    }
+
+    limitations: list[str] = []
+
+    for tool_name, status in statuses.items():
+        display_name = display_names.get(
+            tool_name,
+            tool_name,
+        )
+
+        if status == "failed":
+            error_summary = (
+                _summarize_tool_error(
+                    errors.get(tool_name)
+                )
+            )
+
+            message = (
+                f"{display_name} failed; its "
+                "zero usable results must not "
+                "be interpreted as a successful "
+                "no-hit result."
+            )
+
+            if error_summary:
+                message += (
+                    f" Error summary: "
+                    f"{error_summary}"
+                )
+
+            limitations.append(message)
+
+        elif status == "partial":
+            limitations.append(
+                f"{display_name} completed only "
+                "partially; evidence from this "
+                "tool may be incomplete."
+            )
+
+        elif status == "unknown":
+            limitations.append(
+                f"{display_name} did not provide "
+                "an explicit execution status; "
+                "its result count alone cannot "
+                "distinguish no hits from failure."
+            )
+
+    return limitations
+
+
+def _annotation_status_table_lines(
+    source: dict[str, Any],
+) -> list[str]:
+    statuses = source.get(
+        "tool_statuses",
+        {},
+    )
+    counts = source.get(
+        "result_counts",
+        {},
+    )
+    errors = source.get(
+        "tool_errors",
+        {},
+    )
+
+    if not isinstance(statuses, dict):
+        statuses = {}
+
+    if not isinstance(counts, dict):
+        counts = {}
+
+    if not isinstance(errors, dict):
+        errors = {}
+
+    display_names = {
+        "cdd": "CDD",
+        "interpro": "InterPro",
+        "vogdb": "VOGDB",
+    }
+
+    lines = [
+        "| Tool | Status | Usable results | Error summary |",
+        "|---|---|---:|---|",
+    ]
+
+    for tool_name in (
+        "cdd",
+        "interpro",
+        "vogdb",
+    ):
+        status = statuses.get(
+            tool_name,
+            "unknown",
+        )
+        count = counts.get(
+            tool_name,
+            0,
+        )
+        error_summary = (
+            _summarize_tool_error(
+                errors.get(tool_name)
+            )
+            or ""
+        )
+
+        error_summary = (
+            error_summary
+            .replace("|", "\\|")
+            .replace("\n", " ")
+        )
+
+        lines.append(
+            f"| {display_names[tool_name]} "
+            f"| {status} "
+            f"| {count} "
+            f"| {error_summary} |"
+        )
+
+    return lines
+
+
 def _confidence_reasoning(
     *,
     confidence: str,
@@ -541,19 +861,133 @@ def _confidence_reasoning(
             f"score={special_domain.get('score')}."
         )
 
-    result_counts = summary.get("result_counts", {})
+    result_counts = summary.get(
+        "result_counts",
+        {},
+    )
+
     if isinstance(result_counts, dict):
         reasons.append(
-            "Annotation support counts: "
+            "Usable annotation rows retained: "
             f"CDD={result_counts.get('cdd', 0)}, "
             f"InterPro={result_counts.get('interpro', 0)}, "
             f"VOGDB={result_counts.get('vogdb', 0)}."
         )
 
+    tool_statuses = (
+        _annotation_tool_statuses(
+            summary
+        )
+    )
+    tool_errors = (
+        _annotation_tool_errors(
+            summary
+        )
+    )
+
+    display_names = {
+        "cdd": "CDD",
+        "interpro": "InterPro",
+        "vogdb": "VOGDB",
+    }
+
+    if all(
+        status == "unknown"
+        for status in tool_statuses.values()
+    ):
+        reasons.append(
+            "Per-tool execution statuses were "
+            "not recorded; result counts alone "
+            "cannot distinguish successful no-hit "
+            "results from tool failures."
+        )
+    else:
+        for tool_name in (
+            "cdd",
+            "interpro",
+            "vogdb",
+        ):
+            status = tool_statuses.get(
+                tool_name,
+                "unknown",
+            )
+            count = (
+                result_counts.get(
+                    tool_name,
+                    0,
+                )
+                if isinstance(
+                    result_counts,
+                    dict,
+                )
+                else 0
+            )
+            display_name = display_names[
+                tool_name
+            ]
+
+            if status == "complete":
+                reasons.append(
+                    f"{display_name} completed "
+                    f"successfully with {count} "
+                    "usable result(s)."
+                )
+
+            elif status == "complete_no_hits":
+                reasons.append(
+                    f"{display_name} completed "
+                    "successfully and returned no "
+                    "hits."
+                )
+
+            elif status == "failed":
+                error_summary = (
+                    _summarize_tool_error(
+                        tool_errors.get(
+                            tool_name
+                        )
+                    )
+                )
+
+                reason = (
+                    f"{display_name} failed; "
+                    f"{count} usable result(s) "
+                    "were retained."
+                )
+
+                if error_summary:
+                    reason += (
+                        f" Error summary: "
+                        f"{error_summary}"
+                    )
+
+                reasons.append(reason)
+
+            elif status == "partial":
+                reasons.append(
+                    f"{display_name} completed "
+                    f"partially with {count} "
+                    "usable result(s)."
+                )
+
+            elif status == "skipped":
+                reasons.append(
+                    f"{display_name} was skipped."
+                )
+
+            else:
+                reasons.append(
+                    f"{display_name} execution "
+                    "status is unknown."
+                )
+
     status = summary.get("status")
+
     if status and status != "complete":
         reasons.append(
-            f"CPU annotation status was {status}; confidence is based on available successful tool outputs."
+            f"Overall CPU annotation status was "
+            f"{status}; confidence is based only "
+            "on available successful tool outputs."
         )
 
     if not reasons:
@@ -566,12 +1000,10 @@ def _confidence_reasoning(
 
 def _default_unknown_evidence(summary: dict[str, Any], hits: list[dict[str, Any]]) -> dict[str, Any]:
     return {
-        "schema_version": "target_evidence.v0.1",
-        "source": {
-            "job_id": summary.get("job_id"),
-            "status": summary.get("status"),
-            "result_counts": summary.get("result_counts", {}),
-        },
+        "schema_version": "target_evidence.v0.2",
+        "source": _annotation_source_block(
+            summary,
+        ),
         "target_interpretation": {
             "target_name": "unknown",
             "target_class": "unknown",
@@ -599,7 +1031,9 @@ def _default_unknown_evidence(summary: dict[str, Any], hits: list[dict[str, Any]
             "This target evidence packet is generated from computational annotation only.",
             "It does not prove target identity, binding, inhibition, or antiviral efficacy.",
             "Experimental validation and literature review remain required.",
-        ],
+        ] + _annotation_limitations(
+            summary
+        ),
         "recommended_next_action": "Review annotation hits manually before selecting ligands for docking.",
     }
 
@@ -723,17 +1157,12 @@ def build_target_evidence(
 
     return {
         "schema_version": (
-            "target_evidence.v0.1"
+            "target_evidence.v0.2"
         ),
-        "source": {
-            "job_id": summary.get("job_id"),
-            "status": summary.get("status"),
-            "source_fasta": source_fasta,
-            "result_counts": summary.get(
-                "result_counts",
-                {},
-            ),
-        },
+        "source": _annotation_source_block(
+            summary,
+            source_fasta=source_fasta,
+        ),
         "target_interpretation": {
             "target_name": target_name,
             "target_class": target_class,
@@ -795,7 +1224,9 @@ def build_target_evidence(
             "It does not prove binding, inhibition, or antiviral efficacy.",
             "Docking should be interpreted as hypothesis generation, not validation.",
             "Experimental validation and literature review remain required.",
-        ],
+        ] + _annotation_limitations(
+            summary
+        ),
         "recommended_next_action": (
             "Use annotation and sequence similarity "
             "to retrieve transferable ligand evidence, "
@@ -860,8 +1291,11 @@ def render_target_evidence_report(evidence: dict[str, Any]) -> str:
         "",
         "## Annotation source status",
         "",
-        f"- CPU annotation status: {source.get('status')}",
-        f"- Result counts: {source.get('result_counts')}",
+        f"- Overall CPU annotation status: {source.get('status')}",
+        "",
+        *_annotation_status_table_lines(
+            source
+        ),
         "",
         "## Evidence assessment",
         "",

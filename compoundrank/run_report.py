@@ -140,74 +140,387 @@ def collect_pdb_hypotheses(output_dir: Path) -> list[dict[str, Any]]:
     return hypotheses
 
 
-def _render_target_section(target_evidence: dict[str, Any] | None) -> list[str]:
+def _summarize_annotation_error(
+    error: Any,
+    *,
+    maximum_length: int = 220,
+) -> str:
+    if not error:
+        return ""
+
+    lines = [
+        line.strip()
+        for line in str(error).splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return ""
+
+    preferred_fragments = (
+        "bad file format",
+        "no such file",
+        "permission denied",
+        "out of memory",
+        "timed out",
+        "timeout",
+        "command not found",
+        "exit code:",
+        "runtimeerror:",
+        "error:",
+    )
+
+    selected = None
+
+    for line in reversed(lines):
+        lowered = line.lower()
+
+        if any(
+            fragment in lowered
+            for fragment in preferred_fragments
+        ):
+            selected = line
+            break
+
+    if selected is None:
+        selected = lines[-1]
+
+    selected = (
+        selected
+        .replace("|", "\\|")
+        .replace("\n", " ")
+    )
+
+    if len(selected) > maximum_length:
+        selected = (
+            selected[: maximum_length - 3]
+            + "..."
+        )
+
+    return selected
+
+
+def _render_annotation_status_table(
+    source: dict[str, Any],
+) -> list[str]:
+    overall_status = source.get("status")
+    result_counts = source.get(
+        "result_counts",
+        {},
+    )
+    tool_statuses = source.get(
+        "tool_statuses",
+        {},
+    )
+    tool_errors = source.get(
+        "tool_errors",
+        {},
+    )
+
+    if not isinstance(result_counts, dict):
+        result_counts = {}
+
+    if not isinstance(tool_statuses, dict):
+        tool_statuses = {}
+
+    if not isinstance(tool_errors, dict):
+        tool_errors = {}
+
+    lines = [
+        "### Annotation Execution Status",
+        "",
+        (
+            "- Overall CPU annotation status: "
+            f"{_format_value(overall_status)}"
+        ),
+        "",
+    ]
+
+    if not tool_statuses:
+        lines += [
+            (
+                "- Per-tool execution statuses were "
+                "not available in this legacy evidence file."
+            ),
+            (
+                "- Result counts: "
+                f"{_format_value(result_counts)}"
+            ),
+            "",
+        ]
+        return lines
+
+    display_names = {
+        "cdd": "CDD",
+        "interpro": "InterPro",
+        "vogdb": "VOGDB",
+    }
+
+    lines += [
+        "| Tool | Status | Usable results | Error summary |",
+        "|---|---|---:|---|",
+    ]
+
+    failed_tools: list[str] = []
+    unknown_tools: list[str] = []
+
+    for tool_name in (
+        "cdd",
+        "interpro",
+        "vogdb",
+    ):
+        display_name = display_names[tool_name]
+        status = str(
+            tool_statuses.get(
+                tool_name,
+                "unknown",
+            )
+        )
+        count = result_counts.get(
+            tool_name,
+            0,
+        )
+        error_summary = (
+            _summarize_annotation_error(
+                tool_errors.get(tool_name)
+            )
+        )
+
+        lines.append(
+            f"| {display_name} "
+            f"| {status} "
+            f"| {count} "
+            f"| {error_summary} |"
+        )
+
+        if status == "failed":
+            failed_tools.append(display_name)
+
+        if status == "unknown":
+            unknown_tools.append(display_name)
+
+    lines.append("")
+
+    if failed_tools:
+        lines.append(
+            "- Failed annotation tools: "
+            + ", ".join(failed_tools)
+            + ". Their zero usable-result counts "
+            "must not be interpreted as successful "
+            "no-hit results."
+        )
+        lines.append("")
+
+    if unknown_tools:
+        lines.append(
+            "- Unknown annotation status: "
+            + ", ".join(unknown_tools)
+            + ". Result counts alone cannot confirm "
+            "successful execution."
+        )
+        lines.append("")
+
+    return lines
+
+
+def _render_target_section(
+    target_evidence: dict[str, Any] | None,
+) -> list[str]:
     if target_evidence is None:
         return [
             "## Target Evidence",
             "",
-            "No target evidence file was available for this run.",
+            (
+                "No target evidence file was "
+                "available for this run."
+            ),
             "",
         ]
 
-    interpretation = target_evidence.get("target_interpretation", {})
-    evidence = target_evidence.get("evidence", {})
-    future_query = target_evidence.get("future_ligand_database_query", {})
-    source = target_evidence.get("source", {})
+    interpretation = target_evidence.get(
+        "target_interpretation",
+        {},
+    )
+    evidence = target_evidence.get(
+        "evidence",
+        {},
+    )
+    future_query = target_evidence.get(
+        "future_ligand_database_query",
+        {},
+    )
+    source = target_evidence.get(
+        "source",
+        {},
+    )
+    limitations = target_evidence.get(
+        "limitations",
+        [],
+    )
+
+    if not isinstance(interpretation, dict):
+        interpretation = {}
+
+    if not isinstance(evidence, dict):
+        evidence = {}
+
+    if not isinstance(future_query, dict):
+        future_query = {}
+
+    if not isinstance(source, dict):
+        source = {}
+
+    if not isinstance(limitations, list):
+        limitations = []
 
     lines = [
         "## Target Evidence",
         "",
-        f"- Target name: {_format_value(interpretation.get('target_name'))}",
-        f"- Target class: {_format_value(interpretation.get('target_class'))}",
-        f"- Enzyme class: {_format_value(interpretation.get('enzyme_class'))}",
-        f"- Viral family evidence: {_format_value(interpretation.get('viral_family'))}",
-        f"- Evidence confidence: {_format_value(interpretation.get('evidence_confidence'))}",
-        f"- Docking priority: {_format_value(interpretation.get('docking_priority'))}",
-        f"- CPU annotation status: {_format_value(source.get('status'))}",
-        f"- CPU result counts: {_format_value(source.get('result_counts'))}",
+        (
+            "- Target name: "
+            f"{_format_value(interpretation.get('target_name'))}"
+        ),
+        (
+            "- Target class: "
+            f"{_format_value(interpretation.get('target_class'))}"
+        ),
+        (
+            "- Enzyme class: "
+            f"{_format_value(interpretation.get('enzyme_class'))}"
+        ),
+        (
+            "- Viral family evidence: "
+            f"{_format_value(interpretation.get('viral_family'))}"
+        ),
+        (
+            "- Evidence confidence: "
+            f"{_format_value(interpretation.get('evidence_confidence'))}"
+        ),
+        (
+            "- Docking priority: "
+            f"{_format_value(interpretation.get('docking_priority'))}"
+        ),
         "",
     ]
 
-    confidence_reasoning = evidence.get("confidence_reasoning", [])
-    if confidence_reasoning:
+    lines.extend(
+        _render_annotation_status_table(
+            source
+        )
+    )
+
+    confidence_reasoning = evidence.get(
+        "confidence_reasoning",
+        [],
+    )
+
+    if isinstance(
+        confidence_reasoning,
+        list,
+    ) and confidence_reasoning:
         lines += [
             "### Evidence Reasoning",
             "",
         ]
+
         for reason in confidence_reasoning:
             lines.append(f"- {reason}")
+
         lines.append("")
 
-    special_domain = evidence.get("special_domain_evidence")
-    if special_domain:
+    annotation_limitations = [
+        str(limitation)
+        for limitation in limitations
+        if any(
+            term in str(limitation).lower()
+            for term in (
+                "cdd",
+                "interpro",
+                "vogdb",
+                "annotation",
+                "no-hit",
+                "execution status",
+            )
+        )
+    ]
+
+    if annotation_limitations:
         lines += [
-            "### Specific Domain Evidence",
-            "",
-            f"- Label: {_format_value(special_domain.get('label'))}",
-            f"- Tool: {_format_value(special_domain.get('tool'))}",
-            f"- Hit: {_format_value(special_domain.get('hit_name'))}",
-            f"- Accession: {_format_value(special_domain.get('accession'))}",
-            f"- Coordinates: {_format_value(special_domain.get('start'))}–{_format_value(special_domain.get('end'))}",
-            f"- E-value: {_format_value(special_domain.get('evalue'))}",
-            f"- Score: {_format_value(special_domain.get('score'))}",
+            "### Annotation Limitations",
             "",
         ]
 
-    query_terms = future_query.get("query_terms", [])
+        for limitation in annotation_limitations:
+            lines.append(f"- {limitation}")
+
+        lines.append("")
+
+    special_domain = evidence.get(
+        "special_domain_evidence"
+    )
+
+    if isinstance(
+        special_domain,
+        dict,
+    ) and special_domain:
+        lines += [
+            "### Specific Domain Evidence",
+            "",
+            (
+                "- Label: "
+                f"{_format_value(special_domain.get('label'))}"
+            ),
+            (
+                "- Tool: "
+                f"{_format_value(special_domain.get('tool'))}"
+            ),
+            (
+                "- Hit: "
+                f"{_format_value(special_domain.get('hit_name'))}"
+            ),
+            (
+                "- Accession: "
+                f"{_format_value(special_domain.get('accession'))}"
+            ),
+            (
+                "- Coordinates: "
+                f"{_format_value(special_domain.get('start'))}"
+                "–"
+                f"{_format_value(special_domain.get('end'))}"
+            ),
+            (
+                "- E-value: "
+                f"{_format_value(special_domain.get('evalue'))}"
+            ),
+            (
+                "- Score: "
+                f"{_format_value(special_domain.get('score'))}"
+            ),
+            "",
+        ]
+
+    query_terms = future_query.get(
+        "query_terms",
+        [],
+    )
+
     lines += [
         "### Future Ligand Database Query Terms",
         "",
     ]
 
-    if query_terms:
+    if isinstance(query_terms, list) and query_terms:
         for term in query_terms:
             lines.append(f"- {term}")
     else:
-        lines.append("- No ligand database query terms were recommended.")
+        lines.append(
+            "- No ligand database query terms "
+            "were recommended."
+        )
 
     lines.append("")
-    return lines
 
+    return lines
 
 
 def _relative_or_original(output_dir: Path, value: Any) -> str:
