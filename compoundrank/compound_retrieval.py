@@ -426,6 +426,40 @@ def target_context(
             if not isinstance(row, dict):
                 continue
 
+            raw_start = (
+                row.get("start")
+                or row.get("signature_start")
+            )
+            raw_end = (
+                row.get("end")
+                or row.get("signature_end")
+            )
+
+            try:
+                explicit_start = int(raw_start)
+                explicit_end = int(raw_end)
+            except (TypeError, ValueError):
+                explicit_start = 0
+                explicit_end = 0
+
+            if (
+                explicit_start > 0
+                and explicit_end >= explicit_start
+            ):
+                explicit_scope = {
+                    "start": explicit_start,
+                    "end": explicit_end,
+                    "source": tool_name,
+                }
+
+                if (
+                    explicit_scope
+                    not in annotation_sequence_scopes
+                ):
+                    annotation_sequence_scopes.append(
+                        explicit_scope
+                    )
+
             for field in (
                 "interpro_description",
                 "signature_description",

@@ -14,6 +14,11 @@ The module does not use the local ligand rule registry.
 
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
+import subprocess
+import shutil
+
 import json
 import re
 import urllib.parse
@@ -1119,6 +1124,315 @@ def _combined_target_search_terms(
     return output
 
 
+
+REMOTE_DOMAIN_HOMOLOGY_MAX_EVALUE = 1e-5
+REMOTE_DOMAIN_HOMOLOGY_MIN_IDENTITY = 0.20
+REMOTE_DOMAIN_HOMOLOGY_MIN_ALIGNED_LENGTH = 150
+REMOTE_DOMAIN_HOMOLOGY_MIN_QUERY_COVERAGE = 0.40
+
+
+def _merged_interval_length(
+    intervals: list[tuple[int, int]],
+) -> int:
+    """Return the nonduplicated residue span covered by intervals."""
+    if not intervals:
+        return 0
+
+    normalized = sorted(
+        (
+            min(start, end),
+            max(start, end),
+        )
+        for start, end in intervals
+    )
+
+    current_start, current_end = normalized[0]
+    total = 0
+
+    for start, end in normalized[1:]:
+        if start <= current_end + 1:
+            current_end = max(
+                current_end,
+                end,
+            )
+            continue
+
+        total += current_end - current_start + 1
+        current_start, current_end = start, end
+
+    total += current_end - current_start + 1
+
+    return total
+
+
+def _remote_homology_query_scopes(
+    query_sequence: str,
+    target_context: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Build full-protein and annotated-domain BLAST query scopes."""
+    scopes: list[dict[str, Any]] = [
+        {
+            "scope_type": "full_query",
+            "scope_start": 1,
+            "scope_end": len(query_sequence),
+            "scope_source": "submitted_fasta",
+            "sequence": query_sequence,
+        }
+    ]
+
+    seen = {
+        (
+            1,
+            len(query_sequence),
+        )
+    }
+
+    context = target_context or {}
+
+    annotation_scopes = (
+        context.get("annotation_sequence_scopes")
+        or []
+    )
+
+    if not isinstance(annotation_scopes, list):
+        annotation_scopes = []
+
+    for scope in annotation_scopes:
+        if not isinstance(scope, dict):
+            continue
+
+        try:
+            start = int(scope.get("start"))
+            end = int(scope.get("end"))
+        except (TypeError, ValueError):
+            continue
+
+        if (
+            start < 1
+            or end < start
+            or end > len(query_sequence)
+        ):
+            continue
+
+        key = (start, end)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        scopes.append(
+            {
+                "scope_type": "annotated_domain",
+                "scope_start": start,
+                "scope_end": end,
+                "scope_source": (
+                    scope.get("source")
+                    or "annotation"
+                ),
+                "sequence": query_sequence[
+                    start - 1:end
+                ],
+            }
+        )
+
+    return scopes
+
+
+def blastp_remote_homology_metrics(
+    query: str,
+    target: str,
+    *,
+    timeout_seconds: int = 60,
+    blastp_executable: str | None = None,
+) -> dict[str, float | int] | None:
+    """Calculate conservative remote-homology metrics using BLASTP.
+
+    This helper is optional. If BLASTP is unavailable or fails, target
+    resolution continues without remote-homology evidence.
+    """
+    query = normalize_protein_sequence(query)
+    target = normalize_protein_sequence(target)
+
+    executable = (
+        blastp_executable
+        or shutil.which("blastp")
+    )
+
+    if not executable:
+        return None
+
+    with tempfile.TemporaryDirectory(
+        prefix="compoundrank_blastp_"
+    ) as directory:
+        root = Path(directory)
+        query_path = root / "query.faa"
+        target_path = root / "target.faa"
+
+        query_path.write_text(
+            f">query\n{query}\n",
+            encoding="utf-8",
+        )
+        target_path.write_text(
+            f">target\n{target}\n",
+            encoding="utf-8",
+        )
+
+        command = [
+            executable,
+            "-query",
+            str(query_path),
+            "-subject",
+            str(target_path),
+            "-evalue",
+            "1e-3",
+            "-seg",
+            "yes",
+            "-comp_based_stats",
+            "2",
+            "-max_hsps",
+            "50",
+            "-outfmt",
+            (
+                "6 pident length qstart qend "
+                "sstart send evalue bitscore qlen slen"
+            ),
+        ]
+
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=max(
+                    int(timeout_seconds),
+                    5,
+                ),
+            )
+        except (
+            OSError,
+            subprocess.TimeoutExpired,
+        ):
+            return None
+
+    if completed.returncode != 0:
+        return None
+
+    hsps: list[dict[str, float | int]] = []
+
+    for line in completed.stdout.splitlines():
+        values = line.split("\t")
+
+        if len(values) != 10:
+            continue
+
+        try:
+            hsps.append(
+                {
+                    "identity": (
+                        float(values[0]) / 100.0
+                    ),
+                    "aligned_length": int(values[1]),
+                    "query_start": int(values[2]),
+                    "query_end": int(values[3]),
+                    "target_start": int(values[4]),
+                    "target_end": int(values[5]),
+                    "evalue": float(values[6]),
+                    "bitscore": float(values[7]),
+                    "query_length": int(values[8]),
+                    "target_length": int(values[9]),
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+
+    if not hsps:
+        return None
+
+    hsps.sort(
+        key=lambda item: (
+            float(item["evalue"]),
+            -float(item["bitscore"]),
+        )
+    )
+
+    best = hsps[0]
+
+    query_span = _merged_interval_length(
+        [
+            (
+                int(hsp["query_start"]),
+                int(hsp["query_end"]),
+            )
+            for hsp in hsps
+        ]
+    )
+
+    target_span = _merged_interval_length(
+        [
+            (
+                int(hsp["target_start"]),
+                int(hsp["target_end"]),
+            )
+            for hsp in hsps
+        ]
+    )
+
+    query_coverage = (
+        query_span
+        / int(best["query_length"])
+    )
+
+    target_coverage = (
+        target_span
+        / int(best["target_length"])
+    )
+
+    identity = float(best["identity"])
+
+    return {
+        "identity": identity,
+        "aligned_length": int(
+            best["aligned_length"]
+        ),
+        "query_covered_residues": query_span,
+        "target_covered_residues": target_span,
+        "query_coverage": query_coverage,
+        "target_coverage": target_coverage,
+        "evalue": float(best["evalue"]),
+        "bitscore": float(best["bitscore"]),
+        "query_length": int(best["query_length"]),
+        "target_length": int(best["target_length"]),
+        "hsp_count": len(hsps),
+        "combined_score": (
+            identity * query_coverage
+        ),
+    }
+
+
+def remote_domain_homology_is_qualifying(
+    metrics: dict[str, Any] | None,
+) -> bool:
+    """Return whether BLAST evidence merits manual-review annotation."""
+    if not metrics:
+        return False
+
+    try:
+        return (
+            float(metrics.get("evalue"))
+            <= REMOTE_DOMAIN_HOMOLOGY_MAX_EVALUE
+            and float(metrics.get("identity"))
+            >= REMOTE_DOMAIN_HOMOLOGY_MIN_IDENTITY
+            and int(metrics.get("aligned_length"))
+            >= REMOTE_DOMAIN_HOMOLOGY_MIN_ALIGNED_LENGTH
+            and float(metrics.get("query_coverage"))
+            >= REMOTE_DOMAIN_HOMOLOGY_MIN_QUERY_COVERAGE
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def search_chembl_targets_sequence_first(
     generic_queries: list[dict[str, Any]],
     *,
@@ -1211,6 +1525,17 @@ def search_chembl_targets_sequence_first(
                 targets_by_id[target_id] = candidate
 
     sequence_ranked: list[dict[str, Any]] = []
+    remote_evidence_by_target_id: dict[
+        str,
+        dict[str, Any],
+    ] = {}
+
+    remote_query_scopes = (
+        _remote_homology_query_scopes(
+            query_sequence,
+            target_context,
+        )
+    )
 
     for target_id, search_record in targets_by_id.items():
         try:
@@ -1232,6 +1557,7 @@ def search_chembl_targets_sequence_first(
         )
 
         component_matches: list[dict[str, Any]] = []
+        remote_matches: list[dict[str, Any]] = []
 
         for component_stub in components:
             if not isinstance(component_stub, dict):
@@ -1283,6 +1609,56 @@ def search_chembl_targets_sequence_first(
                     }
                 )
 
+                for scope in remote_query_scopes:
+                    remote_metrics = (
+                        blastp_remote_homology_metrics(
+                            str(scope["sequence"]),
+                            component_sequence,
+                            timeout_seconds=(
+                                timeout_seconds
+                            ),
+                        )
+                    )
+
+                    if not (
+                        remote_domain_homology_is_qualifying(
+                            remote_metrics
+                        )
+                    ):
+                        continue
+
+                    assert remote_metrics is not None
+
+                    remote_matches.append(
+                        {
+                            "component_id": component.get(
+                                "component_id"
+                            ),
+                            "accession": component.get(
+                                "accession"
+                            ),
+                            "description": component.get(
+                                "component_description"
+                            ),
+                            "component_sequence_length": len(
+                                component_sequence
+                            ),
+                            "scope_type": scope[
+                                "scope_type"
+                            ],
+                            "scope_start": scope[
+                                "scope_start"
+                            ],
+                            "scope_end": scope[
+                                "scope_end"
+                            ],
+                            "scope_source": scope[
+                                "scope_source"
+                            ],
+                            **remote_metrics,
+                        }
+                    )
+
         component_matches.sort(
             key=lambda item: (
                 -float(item["combined_score"]),
@@ -1291,6 +1667,35 @@ def search_chembl_targets_sequence_first(
                 str(item.get("accession") or ""),
             )
         )
+
+        remote_matches.sort(
+            key=lambda item: (
+                (
+                    0
+                    if item.get("scope_type")
+                    == "annotated_domain"
+                    else 1
+                ),
+                -float(
+                    item.get("query_coverage")
+                    or 0
+                ),
+                float(
+                    item.get("evalue")
+                    or 1
+                ),
+                -float(
+                    item.get("bitscore")
+                    or 0
+                ),
+                str(item.get("accession") or ""),
+            )
+        )
+
+        if remote_matches:
+            remote_evidence_by_target_id[
+                target_id
+            ] = remote_matches[0]
 
         if not component_matches:
             continue
@@ -1413,22 +1818,116 @@ def search_chembl_targets_sequence_first(
         target_context=target_context,
         max_terms=max_terms,
         per_query_limit=per_query_limit,
-        max_targets=max_targets,
+        max_targets=0,
         timeout_seconds=timeout_seconds,
         request_json=request_json,
     )
 
     for target in fallback_targets:
-        target["target_resolution_route"] = (
-            "text_search_fallback"
+        target_id = str(
+            target.get("target_chembl_id")
+            or ""
         )
+
+        remote = remote_evidence_by_target_id.get(
+            target_id
+        )
+
+        if remote is None:
+            target["target_resolution_route"] = (
+                "text_search_fallback"
+            )
+            target["sequence_resolution"] = {
+                "route": "text_search_fallback",
+                "reason": (
+                    "No candidate component met the minimum "
+                    "sequence identity and query-coverage thresholds, "
+                    "and no qualifying remote-domain homology was found."
+                ),
+            }
+            continue
+
+        target["target_resolution_route"] = (
+            "remote_domain_homology"
+        )
+        target["remote_domain_homology"] = remote
+
         target["sequence_resolution"] = {
-            "route": "text_search_fallback",
+            "route": "remote_domain_homology",
             "reason": (
-                "No candidate component met the minimum "
-                "sequence identity and query-coverage thresholds."
+                "BLASTP identified statistically significant remote "
+                "homology over a substantial protein or annotated-domain "
+                "scope. This supports manual review only and does not "
+                "establish ligand or pocket transferability."
             ),
+            **remote,
         }
+
+        target["sequence_identity"] = remote[
+            "identity"
+        ]
+        target["sequence_query_coverage"] = remote[
+            "query_coverage"
+        ]
+        target["sequence_target_coverage"] = remote[
+            "target_coverage"
+        ]
+        target["sequence_match_score"] = remote[
+            "combined_score"
+        ]
+        target["matched_component_id"] = remote.get(
+            "component_id"
+        )
+        target["matched_component_accession"] = (
+            remote.get("accession")
+        )
+        target["matched_component_description"] = (
+            remote.get("description")
+        )
+
+    fallback_targets.sort(
+        key=lambda target: (
+            (
+                0
+                if target.get(
+                    "target_resolution_route"
+                )
+                == "remote_domain_homology"
+                else 1
+            ),
+            float(
+                (
+                    target.get(
+                        "remote_domain_homology"
+                    )
+                    or {}
+                ).get("evalue")
+                or 1
+            ),
+            -float(
+                (
+                    target.get(
+                        "remote_domain_homology"
+                    )
+                    or {}
+                ).get("query_coverage")
+                or 0
+            ),
+            -float(
+                target.get("target_match_score")
+                or 0
+            ),
+            str(
+                target.get("target_chembl_id")
+                or ""
+            ),
+        )
+    )
+
+    if max_targets > 0:
+        fallback_targets = fallback_targets[
+            :max_targets
+        ]
 
     return fallback_targets, search_terms
 
@@ -1631,6 +2130,32 @@ def _target_transfer_assessment(
                 "Sequence identity or query coverage is too low for "
                 "confident activity transfer."
             )
+
+    elif route == "remote_domain_homology":
+        level = "exploratory"
+
+        remote = (
+          target.get("remote_domain_homology")
+          or target.get("sequence_resolution")
+          or {}
+        )
+
+        reasons.append(
+          "BLASTP supports remote protein-family or domain "
+          "homology, but this does not establish conservation "
+          "of the compound-binding pocket or transferable activity."
+        )
+
+        if remote:
+          reasons.append(
+            "Remote-homology evidence: "
+            f"identity={float(remote.get('identity') or 0):.1%}, "
+            f"scope coverage="
+            f"{float(remote.get('query_coverage') or 0):.1%}, "
+            f"aligned length="
+            f"{int(remote.get('aligned_length') or 0)}, "
+            f"E-value={float(remote.get('evalue') or 1):.3g}."
+          )
 
     elif route == "text_search_fallback":
         level = "exploratory"
@@ -1963,6 +2488,12 @@ def make_chembl_candidate(
         "matched_component_description": target.get(
             "matched_component_description"
         ),
+        "sequence_resolution": target.get(
+            "sequence_resolution"
+        ),
+        "remote_domain_homology": target.get(
+            "remote_domain_homology"
+        ),
     }
 
     activity_record = _supporting_activity_record(
@@ -2125,6 +2656,12 @@ def make_chembl_candidate(
         ),
         "sequence_query_coverage": target.get(
             "sequence_query_coverage"
+        ),
+        "sequence_resolution": target.get(
+            "sequence_resolution"
+        ),
+        "remote_domain_homology": target.get(
+            "remote_domain_homology"
         ),
         "target_family_basis": (
             reference_target_name
