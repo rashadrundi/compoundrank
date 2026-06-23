@@ -40,6 +40,7 @@ def run_gnina_seed(
     gnina_bin: str = "gnina",
     cpu: int | None = None,
     device: int | None = None,
+    timeout_seconds: int | None = None,
 ) -> list[PoseRecord]:
     gnina = resolve_executable(gnina_bin, "GNINA")
     seed_dir = work_dir / ligand.name / pocket.pocket_id / f"seed_{seed}"
@@ -75,7 +76,10 @@ def run_gnina_seed(
     if device is not None:
         command += ["--device", str(device)]
 
-    completed = run_command(command)
+    completed = run_command(
+        command,
+        timeout_seconds=timeout_seconds,
+    )
 
     if completed.stdout:
         print(completed.stdout, end="")

@@ -40,6 +40,7 @@ from .receptor import prepare_receptor
 from .uncertainty import assess_uncertainty
 from .validity import filter_poses_with_posebusters
 from .run_report import write_run_report
+from .subprocess_utils import CommandTimeoutError
 
 
 def _top_score(result: LigandResult) -> float:
@@ -424,6 +425,7 @@ def run_pipeline(
     overwrite: bool,
     cpu: int | None,
     device: int | None,
+    gnina_timeout_seconds: int | None = 3600,
     fasta_path: Path | None = None,
     homolog_api_url: str = DEFAULT_API_URL,
     homolog_timeout_seconds: int = 7200,
@@ -721,19 +723,49 @@ def run_pipeline(
             for pocket in pockets:
                 print(f"\n[POCKET RUN] {ligand.name}: {pocket.pocket_id}")
 
-                raw_records = run_gnina_ensemble(
-                    receptor,
-                    ligand,
-                    pocket,
-                    seeds,
-                    work_dir / "docking",
-                    exhaustiveness=exhaustiveness,
-                    num_modes=num_modes,
-                    cnn_scoring=cnn_scoring,
-                    gnina_bin=gnina_bin,
-                    cpu=cpu,
-                    device=device,
-                )
+                try:
+                    raw_records = run_gnina_ensemble(
+                        receptor,
+                        ligand,
+                        pocket,
+                        seeds,
+                        work_dir / "docking",
+                        exhaustiveness=exhaustiveness,
+                        num_modes=num_modes,
+                        cnn_scoring=cnn_scoring,
+                        gnina_bin=gnina_bin,
+                        cpu=cpu,
+                        device=device,
+                        timeout_seconds=gnina_timeout_seconds,
+                    )
+
+                except CommandTimeoutError as error:
+                    print(
+                        "[GNINA TIMEOUT] "
+                        f"{ligand.name} "
+                        f"{pocket.pocket_id}: exceeded "
+                        f"{error.timeout_seconds:g} seconds"
+                    )
+
+                    docking_attempt_rows.append(
+                        {
+                            "compound": ligand.name,
+                            "pocket": pocket.pocket_id,
+                            "raw_poses": 0,
+                            "accepted_poses": 0,
+                            "rejected_poses": 0,
+                            "status": "timed_out",
+                            "best_raw_cnn_score": "",
+                            "best_accepted_cnn_score": "",
+                        }
+                    )
+
+                    print(
+                        "[GNINA TIMEOUT] Continuing to "
+                        "the next pocket."
+                    )
+
+                    continue
 
                 raw_records_by_pocket[pocket.pocket_id] = list(
                     raw_records
@@ -886,22 +918,37 @@ def run_pipeline(
                 rmsd_threshold=cluster_threshold,
             )
 
-            uncertainty, reasons = assess_uncertainty(clusters, len(seeds))
-
-            top_score = clusters[0].representative.cnn_score if clusters else None
-
-            ligand_results.append(
-                LigandResult(
-                    ligand=ligand,
-                    clusters=clusters,
-                    uncertainty=uncertainty,
-                    uncertainty_reasons=reasons,
-                    top_score=top_score,
-                )
+            uncertainty, reasons = assess_uncertainty(
+                clusters,
+                len(seeds),
             )
 
+            top_score = (
+                clusters[0].representative.cnn_score
+                if clusters
+                else None
+            )
+
+            if clusters:
+                ligand_results.append(
+                    LigandResult(
+                        ligand=ligand,
+                        clusters=clusters,
+                        uncertainty=uncertainty,
+                        uncertainty_reasons=reasons,
+                        top_score=top_score,
+                    )
+                )
+            else:
+                print(
+                    "[RANKING EXCLUDED] "
+                    f"{ligand.name}: no valid pose clusters "
+                    "were produced."
+                )
+
             print(
-                f"[HYPOTHESES] {ligand.name}: {len(clusters)} clusters; "
+                f"[HYPOTHESES] {ligand.name}: "
+                f"{len(clusters)} clusters; "
                 f"uncertainty={uncertainty}"
             )
 

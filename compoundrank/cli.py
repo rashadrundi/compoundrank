@@ -138,6 +138,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpu", type=int, default=None)
     parser.add_argument("--device", type=int, default=None)
 
+    parser.add_argument(
+        "--gnina-timeout-seconds",
+        type=int,
+        default=3600,
+        help=(
+            "Maximum runtime for each GNINA seed/pocket job. "
+            "Use 0 to disable the timeout."
+        ),
+    )
     parser.add_argument("--gnina-bin", default="gnina")
     parser.add_argument("--fpocket-bin", default="fpocket")
     parser.add_argument("--obabel-bin", default="obabel")
@@ -319,6 +328,11 @@ def main(argv: list[str] | None = None) -> int:
         cnn_scoring=args.cnn_scoring,
         ph=args.ph,
         gnina_bin=args.gnina_bin,
+        gnina_timeout_seconds=(
+            args.gnina_timeout_seconds
+            if args.gnina_timeout_seconds > 0
+            else None
+        ),
         fpocket_bin=args.fpocket_bin,
         obabel_bin=args.obabel_bin,
         pdb2pqr_bin=args.pdb2pqr_bin,
