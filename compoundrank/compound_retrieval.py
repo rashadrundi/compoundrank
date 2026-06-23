@@ -18,6 +18,8 @@ Future expansion hooks:
 
 from __future__ import annotations
 
+import re
+
 import argparse
 import csv
 import json
@@ -122,47 +124,545 @@ def _as_list(value: Any) -> list[str]:
     return []
 
 
-def target_context(target_evidence: dict[str, Any]) -> dict[str, Any]:
-    """Normalize target-evidence fields across output schema versions."""
-    interpretation = target_evidence.get("target_interpretation") or {}
-    special_domain = _nested(target_evidence, "evidence", "special_domain_evidence") or {}
+def target_context(
+    target_evidence: dict[str, Any],
+    *,
+    homolog_summary: dict[str, Any] | None = None,
+    fasta_path: Path | None = None,
+) -> dict[str, Any]:
+    """Normalize ligand and target-discovery context separately.
 
-    query_terms = (
-        target_evidence.get("future_ligand_database_query")
-        or target_evidence.get("future_ligand_database_query_terms")
-        or target_evidence.get("ligand_query_terms")
-        or interpretation.get("future_ligand_database_query")
-        or interpretation.get("future_ligand_database_query_terms")
-        or interpretation.get("ligand_query_terms")
-        or []
+    Ligand query terms describe compounds to retrieve. Target-discovery
+    terms broaden ChEMBL target lookup, but do not establish biological
+    transferability. Sequence alignment remains the approval gate.
+    """
+    interpretation = (
+        target_evidence.get("target_interpretation")
+        or {}
+    )
+    evidence = target_evidence.get("evidence") or {}
+    special_domain = (
+        _nested(
+            target_evidence,
+            "evidence",
+            "special_domain_evidence",
+        )
+        or {}
     )
 
+    placeholder_values = {
+        "",
+        "-",
+        "unknown",
+        "none",
+        "null",
+        "n/a",
+        "na",
+        "unclassified",
+        "not available",
+    }
+
+    def clean_text(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+
+        cleaned = " ".join(value.strip().split())
+
+        if cleaned.casefold() in placeholder_values:
+            return ""
+
+        return cleaned
+
+    def unique_strings(values: Any) -> list[str]:
+        output: list[str] = []
+        seen: set[str] = set()
+
+        for value in _as_list(values):
+            cleaned = clean_text(value)
+            key = cleaned.casefold()
+
+            if not cleaned or key in seen:
+                continue
+
+            seen.add(key)
+            output.append(cleaned)
+
+        return output
+
+    raw_query_block = (
+        target_evidence.get(
+            "future_ligand_database_query"
+        )
+        or interpretation.get(
+            "future_ligand_database_query"
+        )
+    )
+
+    if isinstance(raw_query_block, dict):
+        ligand_query_terms = unique_strings(
+            raw_query_block.get("query_terms")
+        )
+    else:
+        ligand_query_terms = unique_strings(
+            raw_query_block
+            or target_evidence.get(
+                "future_ligand_database_query_terms"
+            )
+            or target_evidence.get(
+                "ligand_query_terms"
+            )
+            or interpretation.get(
+                "future_ligand_database_query_terms"
+            )
+            or interpretation.get(
+                "ligand_query_terms"
+            )
+            or []
+        )
+
+    target_name = _first_text(
+        target_evidence.get("target_name"),
+        interpretation.get("target_name"),
+        special_domain.get("target_name"),
+    )
+    target_class = _first_text(
+        target_evidence.get("target_class"),
+        interpretation.get("target_class"),
+        special_domain.get("target_class"),
+    )
+    enzyme_class = _first_text(
+        target_evidence.get("enzyme_class"),
+        interpretation.get("enzyme_class"),
+        special_domain.get("enzyme_class"),
+    )
+
+    target_discovery_terms: list[dict[str, Any]] = []
+    seen_target_terms: set[str] = set()
+
+    def add_target_term(
+        value: Any,
+        *,
+        specificity: int,
+        route: str,
+    ) -> None:
+        cleaned = clean_text(value)
+
+        if not cleaned:
+            return
+
+        if re.fullmatch(
+            r"VOG\d+",
+            cleaned,
+            flags=re.IGNORECASE,
+        ):
+            return
+
+        if cleaned.startswith("Q#"):
+            return
+
+        if len(cleaned) > 180:
+            return
+
+        key = cleaned.casefold()
+
+        if key in seen_target_terms:
+            return
+
+        seen_target_terms.add(key)
+        target_discovery_terms.append(
+            {
+                "term": cleaned,
+                "specificity": specificity,
+                "retrieval_route": route,
+                "original_query": cleaned,
+            }
+        )
+
+    def add_accessions(value: Any) -> None:
+        if not isinstance(value, str):
+            return
+
+        for accession in re.findall(
+            r"\b(?:PF|IPR)\d+\b",
+            value,
+            flags=re.IGNORECASE,
+        ):
+            add_target_term(
+                accession.upper(),
+                specificity=108,
+                route=(
+                    "context_annotation_accession_search"
+                ),
+            )
+
+    def clean_query_identifier(
+        value: Any,
+    ) -> str:
+        cleaned = clean_text(value)
+
+        if ">" in cleaned:
+            cleaned = cleaned.rsplit(">", 1)[-1]
+
+        cleaned = re.sub(
+            r"(?:_|[\s-])+"
+            r"(?:residues?(?:_|[\s-])+)?"
+            r"\d+(?:_|[\s-])+\d+$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+
+        cleaned = re.sub(
+            r"[_|]+",
+            " ",
+            cleaned,
+        )
+
+        return " ".join(cleaned.split())
+
+    def add_query_identifier(value: Any) -> None:
+        cleaned = clean_query_identifier(value)
+
+        if not cleaned:
+            return
+
+        add_target_term(
+            cleaned,
+            specificity=124,
+            route="context_annotation_query_search",
+        )
+
+    annotation_sequence_scopes: list[
+        dict[str, Any]
+    ] = []
+
+    def add_scope(
+        value: Any,
+        source: str,
+    ) -> None:
+        if not isinstance(value, str):
+            return
+
+        match = re.search(
+            r"residues?[_\s-]+"
+            r"(\d+)[_\s-]+(\d+)",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+        if not match:
+            return
+
+        scope = {
+            "start": int(match.group(1)),
+            "end": int(match.group(2)),
+            "source": source,
+        }
+
+        if scope not in annotation_sequence_scopes:
+            annotation_sequence_scopes.append(scope)
+
+    supporting_hits = evidence.get(
+        "supporting_hits"
+    )
+
+    if isinstance(supporting_hits, list):
+        for hit in supporting_hits:
+            if not isinstance(hit, dict):
+                continue
+
+            tool = clean_text(
+                hit.get("tool")
+            ) or "annotation"
+            label = clean_text(hit.get("label"))
+            text = clean_text(hit.get("text"))
+
+            if label and not re.fullmatch(
+                r"VOG\d+",
+                label,
+                flags=re.IGNORECASE,
+            ):
+                add_target_term(
+                    label,
+                    specificity=128,
+                    route=(
+                        "context_annotation_label_search"
+                    ),
+                )
+
+            add_accessions(label)
+            add_accessions(text)
+            add_scope(text, tool)
+
+            if text:
+                query_match = re.search(
+                    r"\bquery=([^;]+)",
+                    text,
+                    flags=re.IGNORECASE,
+                )
+
+                if query_match:
+                    add_query_identifier(
+                        query_match.group(1)
+                    )
+
+    summary = homolog_summary or {}
+    summary_rows = summary.get("rows") or {}
+
+    if not isinstance(summary_rows, dict):
+        summary_rows = {}
+
+    for tool_name in (
+        "interpro",
+        "cdd",
+        "vogdb",
+    ):
+        rows = summary_rows.get(tool_name) or []
+
+        if not isinstance(rows, list):
+            continue
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+
+            for field in (
+                "interpro_description",
+                "signature_description",
+                "description",
+                "title",
+            ):
+                value = clean_text(row.get(field))
+
+                if value:
+                    add_target_term(
+                        value,
+                        specificity=144,
+                        route=(
+                            "context_annotation_description_search"
+                        ),
+                    )
+
+                add_accessions(value)
+
+            for field in (
+                "signature_accession",
+                "interpro_accession",
+                "accession",
+            ):
+                add_accessions(row.get(field))
+
+            protein_accession = row.get(
+                "protein_accession"
+            )
+
+            if protein_accession:
+                add_query_identifier(
+                    protein_accession
+                )
+
+            notes = row.get("notes")
+            add_accessions(notes)
+            add_scope(notes, tool_name)
+
+            if isinstance(notes, str):
+                query_match = re.search(
+                    r"\bquery=([^;]+)",
+                    notes,
+                    flags=re.IGNORECASE,
+                )
+
+                if query_match:
+                    add_query_identifier(
+                        query_match.group(1)
+                    )
+
+    target_noun = ""
+
+    for candidate in (
+        target_name,
+        target_class,
+        enzyme_class,
+    ):
+        lowered = candidate.lower()
+
+        if "polymerase" in lowered:
+            target_noun = "polymerase"
+            break
+
+    if not target_noun:
+        target_noun = clean_text(
+            target_name
+            or target_class
+            or enzyme_class
+        )
+
+    source_fasta = _nested(
+        target_evidence,
+        "source",
+        "source_fasta",
+    )
+
+    fasta_candidates: list[Path] = []
+
+    if fasta_path is not None:
+        fasta_candidates.append(Path(fasta_path))
+
+    if isinstance(source_fasta, str) and source_fasta:
+        source_path = Path(source_fasta)
+
+        if source_path not in fasta_candidates:
+            fasta_candidates.append(source_path)
+
+    for candidate_path in fasta_candidates:
+        if not candidate_path.is_file():
+            continue
+
+        try:
+            first_line = (
+                candidate_path.open(
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                .readline()
+                .strip()
+            )
+        except OSError:
+            continue
+
+        if not first_line.startswith(">"):
+            continue
+
+        header = first_line[1:].strip()
+        add_scope(header, "fasta_header")
+
+        organism_match = re.search(
+            r"\bOS=(.+?)(?=\s[A-Z]{1,3}=|$)",
+            header,
+        )
+
+        organism = (
+            clean_text(organism_match.group(1))
+            if organism_match
+            else ""
+        )
+
+        accession = ""
+
+        if "|" in header:
+            header_parts = header.split("|", 2)
+
+            if len(header_parts) >= 2:
+                possible_accession = clean_text(
+                    header_parts[1]
+                )
+
+                if re.fullmatch(
+                    r"[A-Z0-9]{5,10}",
+                    possible_accession,
+                    flags=re.IGNORECASE,
+                ):
+                    accession = possible_accession.upper()
+
+        if accession:
+            add_target_term(
+                accession,
+                specificity=150,
+                route=(
+                    "context_protein_accession_search"
+                ),
+            )
+
+        description_text = header
+
+        if "|" in description_text:
+            description_parts = (
+                description_text.split("|", 2)
+            )
+
+            if len(description_parts) == 3:
+                description_text = (
+                    description_parts[2]
+                )
+
+        description_text = re.split(
+            r"\sOS=",
+            description_text,
+            maxsplit=1,
+        )[0]
+
+        description_text = re.sub(
+            r"^[A-Z0-9_]+\s+",
+            "",
+            description_text,
+        )
+
+        description_text = (
+            clean_query_identifier(
+                description_text
+            )
+        )
+
+        if organism and description_text:
+            add_target_term(
+                f"{organism} {description_text}",
+                specificity=148,
+                route=(
+                    "context_organism_protein_search"
+                ),
+            )
+
+        if organism and target_noun:
+            add_target_term(
+                f"{organism} {target_noun}",
+                specificity=146,
+                route=(
+                    "context_organism_target_search"
+                ),
+            )
+
+        if organism:
+            add_target_term(
+                organism,
+                specificity=118,
+                route="context_organism_search",
+            )
+
+        if description_text:
+            add_target_term(
+                description_text,
+                specificity=136,
+                route=(
+                    "context_protein_description_search"
+                ),
+            )
+
+        add_query_identifier(
+            candidate_path.stem
+        )
+
     return {
-        "target_name": _first_text(
-            target_evidence.get("target_name"),
-            interpretation.get("target_name"),
-            special_domain.get("target_name"),
-        ),
-        "target_class": _first_text(
-            target_evidence.get("target_class"),
-            interpretation.get("target_class"),
-            special_domain.get("target_class"),
-        ),
-        "enzyme_class": _first_text(
-            target_evidence.get("enzyme_class"),
-            interpretation.get("enzyme_class"),
-            special_domain.get("enzyme_class"),
-        ),
+        "target_name": target_name,
+        "target_class": target_class,
+        "enzyme_class": enzyme_class,
         "viral_family": _first_text(
-            target_evidence.get("viral_family_evidence"),
-            interpretation.get("viral_family_evidence"),
+            target_evidence.get(
+                "viral_family_evidence"
+            ),
+            interpretation.get(
+                "viral_family_evidence"
+            ),
             interpretation.get("viral_family"),
             special_domain.get("viral_family"),
         ),
         "confidence": _first_text(
-            target_evidence.get("evidence_confidence"),
+            target_evidence.get(
+                "evidence_confidence"
+            ),
             target_evidence.get("confidence"),
-            interpretation.get("evidence_confidence"),
+            interpretation.get(
+                "evidence_confidence"
+            ),
             interpretation.get("confidence"),
             special_domain.get("confidence"),
         ),
@@ -175,7 +675,18 @@ def target_context(target_evidence: dict[str, Any]) -> dict[str, Any]:
             special_domain.get("accession"),
             default="",
         ),
-        "query_terms": _as_list(query_terms),
+        "query_terms": ligand_query_terms,
+        "target_discovery_terms": (
+            target_discovery_terms
+        ),
+        "annotation_sequence_scopes": (
+            annotation_sequence_scopes
+        ),
+        "target_discovery_note": (
+            "Target-discovery terms broaden database "
+            "lookup only. Sequence alignment remains "
+            "the ligand-transfer approval gate."
+        ),
     }
 
 
@@ -1052,7 +1563,11 @@ def run_compound_retrieval(
         else None
     )
 
-    normalized_context = target_context(target_evidence)
+    normalized_context = target_context(
+        target_evidence,
+        homolog_summary=homolog_summary,
+        fasta_path=fasta_path,
+    )
     generic_queries = generate_generic_queries(normalized_context)
 
     query_sequence = (

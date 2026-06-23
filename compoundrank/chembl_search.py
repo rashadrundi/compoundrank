@@ -279,6 +279,45 @@ def build_context_target_terms(
 
     raw_terms: list[tuple[str, int, str]] = []
 
+    discovery_terms = (
+        target_context.get("target_discovery_terms")
+        or []
+    )
+
+    if isinstance(discovery_terms, list):
+        for item in discovery_terms:
+            if isinstance(item, str):
+                term = item
+                specificity = 130
+                route = (
+                    "context_curated_target_search"
+                )
+            elif isinstance(item, dict):
+                term = str(
+                    item.get("term") or ""
+                ).strip()
+                specificity = int(
+                    item.get("specificity")
+                    or 130
+                )
+                route = str(
+                    item.get("retrieval_route")
+                    or "context_curated_target_search"
+                )
+            else:
+                continue
+
+            if not term:
+                continue
+
+            raw_terms.append(
+                (
+                    term,
+                    specificity,
+                    route,
+                )
+            )
+
     for acronym in sorted(acronyms):
         raw_terms.append(
             (
