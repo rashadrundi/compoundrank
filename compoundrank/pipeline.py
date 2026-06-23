@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
 from pathlib import Path
@@ -14,7 +15,13 @@ from .export import write_complex_pdb
 from .gnina import run_gnina_ensemble
 from .homolog_search import DEFAULT_API_URL, run_homolog_search
 from .interactions import summarize_interactions
-from .ligand import LigandRequest, prepare_ligand, read_manifest
+from .ligand import (
+    LigandEligibilityError,
+    LigandRequest,
+    assess_ligand_file,
+    prepare_ligand,
+    read_manifest,
+)
 from .models import LigandResult, PoseRecord
 from .pocket import (
     build_pocket_definitions,
@@ -271,6 +278,117 @@ def _run_selected_pocket_pose_recovery(
 
     return summary, outputs
 
+
+def _write_ligand_eligibility_report(
+    output_dir: Path,
+    rows: list[dict[str, object]],
+) -> tuple[Path, Path]:
+    """Write ligand eligibility decisions in CSV and JSON formats."""
+
+    csv_path = output_dir / "ligand_eligibility_report.csv"
+    json_path = output_dir / "ligand_eligibility_report.json"
+
+    status_counts: dict[str, int] = {}
+
+    for row in rows:
+        status = str(
+            row.get("eligibility_status")
+            or "unknown"
+        )
+        status_counts[status] = (
+            status_counts.get(status, 0) + 1
+        )
+
+    eligible_count = sum(
+        bool(row.get("eligible"))
+        for row in rows
+    )
+
+    payload = {
+        "summary": {
+            "evaluated_count": len(rows),
+            "eligible_count": eligible_count,
+            "excluded_count": (
+                len(rows) - eligible_count
+            ),
+            "status_counts": status_counts,
+        },
+        "eligibility_configuration": {
+            "workflow": (
+                "standard_small_molecule_gnina"
+            ),
+            "decision_source": (
+                "RDKit structure-based assessment"
+            ),
+            "note": (
+                "Excluded compounds remain documented but "
+                "are not sent to Open Babel, Meeko, GNINA, "
+                "or PoseBusters."
+            ),
+        },
+        "ligands": rows,
+    }
+
+    json_path.write_text(
+        json.dumps(
+            payload,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    fieldnames = [
+        "compound",
+        "source_type",
+        "source_value",
+        "eligible",
+        "eligibility_status",
+        "recommended_workflow",
+        "molecular_weight",
+        "heavy_atom_count",
+        "rotatable_bond_count",
+        "formal_charge",
+        "amide_bond_count",
+        "fragment_count",
+        "eligibility_reasons",
+        "error",
+    ]
+
+    with csv_path.open(
+        "w",
+        encoding="utf-8",
+        newline="",
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=fieldnames,
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+
+        for row in rows:
+            csv_row = dict(row)
+
+            reasons = csv_row.get(
+                "eligibility_reasons",
+                [],
+            )
+
+            if isinstance(reasons, list):
+                csv_row["eligibility_reasons"] = (
+                    "; ".join(
+                        str(reason)
+                        for reason in reasons
+                    )
+                )
+
+            writer.writerow(csv_row)
+
+    return csv_path, json_path
+
+
 def run_pipeline(
     *,
     receptor_pdb: Path,
@@ -510,15 +628,86 @@ def run_pipeline(
         ligand_results: list[LigandResult] = []
         docking_attempt_rows: list[dict[str, object]] = []
         pocket_selection_rows: list[dict[str, object]] = []
+        ligand_eligibility_rows: list[dict[str, object]] = []
 
         for request in ligand_requests:
             print(f"\n[LIGAND] Preparing {request.name}")
-            ligand = prepare_ligand(
-                request,
-                cache_root,
-                ph=ph,
-                obabel_bin=obabel_bin,
-                meeko_ligand_bin=meeko_ligand_bin,
+
+            try:
+                ligand = prepare_ligand(
+                    request,
+                    cache_root,
+                    ph=ph,
+                    obabel_bin=obabel_bin,
+                    meeko_ligand_bin=meeko_ligand_bin,
+                )
+
+            except LigandEligibilityError as error:
+                assessment = dict(error.assessment)
+
+                ligand_eligibility_rows.append(
+                    {
+                        "compound": request.name,
+                        "source_type": request.source_type,
+                        "source_value": request.value,
+                        **assessment,
+                        "error": str(error),
+                    }
+                )
+
+                _write_ligand_eligibility_report(
+                    output_dir,
+                    ligand_eligibility_rows,
+                )
+
+                print(
+                    "[LIGAND EXCLUDED] "
+                    f"{request.name}: "
+                    f"{assessment.get(
+                        'eligibility_status',
+                        'excluded',
+                    )}"
+                )
+
+                for reason in assessment.get(
+                    "eligibility_reasons",
+                    [],
+                ):
+                    print(
+                        "[LIGAND EXCLUDED] Reason: "
+                        f"{reason}"
+                    )
+
+                print(
+                    "[LIGAND EXCLUDED] "
+                    "Recommended workflow: "
+                    f"{assessment.get(
+                        'recommended_workflow',
+                        'manual_review',
+                    )}"
+                )
+
+                continue
+
+            assessment = assess_ligand_file(
+                ligand.source_sdf
+            )
+
+            ligand_eligibility_rows.append(
+                {
+                    "compound": request.name,
+                    "source_type": request.source_type,
+                    "source_value": request.value,
+                    **assessment,
+                    "error": "",
+                }
+            )
+
+            # Update the report throughout long runs so it
+            # survives later failures or manual termination.
+            _write_ligand_eligibility_report(
+                output_dir,
+                ligand_eligibility_rows,
             )
 
             all_valid_records = []
@@ -791,6 +980,22 @@ def run_pipeline(
                 "[REPORT] Pocket selection JSON: "
                 f"{selection_json}"
             )
+
+        eligibility_csv, eligibility_json = (
+            _write_ligand_eligibility_report(
+                output_dir,
+                ligand_eligibility_rows,
+            )
+        )
+
+        print(
+            "[REPORT] Ligand eligibility CSV: "
+            f"{eligibility_csv}"
+        )
+        print(
+            "[REPORT] Ligand eligibility JSON: "
+            f"{eligibility_json}"
+        )
 
         if homology_future is not None:
             print("\n[HOMOLOGY] Waiting for CPU homolog search to finish")
