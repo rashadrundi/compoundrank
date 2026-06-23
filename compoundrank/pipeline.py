@@ -523,19 +523,101 @@ def run_pipeline(
 
         if not ligand_requests:
             if auto_retrieve_mode == "generic-strict":
-                raise RuntimeError(
-                    "generic-strict retrieval produced no externally "
-                    "discovered dockable ligands. The local seed registry "
-                    "was correctly disabled. Inspect "
-                    f"{retrieval_outputs['generic_search_queries']} and "
-                    "connect an external ligand database backend before "
-                    "running docking."
+                skip_reason = (
+                    "No externally supported candidates met the "
+                    "automatic docking threshold. Exploratory evidence "
+                    "remains available for manual review."
+                )
+            else:
+                skip_reason = (
+                    "Automatic ligand retrieval produced no candidates "
+                    "that were approved for docking and associated with "
+                    "a usable molecular structure."
                 )
 
-            raise RuntimeError(
-                "Auto ligand retrieval produced no dockable ligand requests. "
-                f"Check {generated_manifest}"
+            skip_payload = {
+                "stage": "docking",
+                "status": "skipped",
+                "pipeline_outcome": (
+                    "completed_without_docking"
+                ),
+                "reason_code": (
+                    "no_dockable_ligands"
+                ),
+                "reason": skip_reason,
+                "retrieval_mode": (
+                    auto_retrieve_mode
+                ),
+                "dockable_ligand_count": 0,
+                "docking_manifest": str(
+                    generated_manifest
+                ),
+                "retrieval_outputs": {
+                    str(name): str(value)
+                    for name, value
+                    in retrieval_outputs.items()
+                },
+                "downstream_stages": {
+                    "receptor_preparation": (
+                        "skipped"
+                    ),
+                    "pocket_detection": (
+                        "skipped"
+                    ),
+                    "ligand_preparation": (
+                        "skipped"
+                    ),
+                    "gnina_docking": "skipped",
+                    "pose_validation": (
+                        "skipped"
+                    ),
+                    "pose_ranking": "skipped",
+                },
+            }
+
+            skip_path = (
+                output_dir
+                / "docking_skipped.json"
             )
+
+            skip_path.write_text(
+                json.dumps(
+                    skip_payload,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            print(
+                "[DOCKING SKIPPED] No ligand "
+                "passed the automatic evidence "
+                "and structure gates."
+            )
+            print(
+                "[DOCKING SKIPPED] Reason: "
+                f"{skip_reason}"
+            )
+            print(
+                "[DOCKING SKIPPED] Manifest: "
+                f"{generated_manifest}"
+            )
+            print(
+                "[DOCKING SKIPPED] Status: "
+                f"{skip_path}"
+            )
+
+            run_report_path = write_run_report(
+                output_dir=output_dir,
+            )
+
+            print(
+                "\n[REPORT] Run report: "
+                f"{run_report_path}"
+            )
+
+            return []
 
         print(f"[COMPOUND_RETRIEVAL] Docking manifest: {generated_manifest}")
         print(f"[COMPOUND_RETRIEVAL] Dockable ligands: {len(ligand_requests)}")
