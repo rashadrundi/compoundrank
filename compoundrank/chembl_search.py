@@ -1478,7 +1478,16 @@ def activity_is_usable(
     return True
 
 
+EVIDENCE_LEVEL_STRENGTH = {
+    "exploratory": 0,
+    "weak": 1,
+    "moderate": 2,
+    "strong": 3,
+}
+
+
 def _evidence_level(pchembl_value: float) -> str:
+    """Classify measured potency without considering transferability."""
     if pchembl_value >= 7.0:
         return "strong"
     if pchembl_value >= 6.0:
@@ -1486,6 +1495,174 @@ def _evidence_level(pchembl_value: float) -> str:
     if pchembl_value >= 5.0:
         return "weak"
     return "exploratory"
+
+
+def _normalize_similarity_metric(
+    value: Any,
+) -> float | None:
+    """Normalize identity/coverage represented as 0-1 or 0-100."""
+    numeric = _as_float(value)
+
+    if numeric is None:
+        return None
+
+    if numeric > 1.0:
+        numeric /= 100.0
+
+    return max(0.0, min(1.0, numeric))
+
+
+def _weakest_evidence_level(
+    *levels: str,
+) -> str:
+    """Return the most conservative level among several evidence axes."""
+    normalized = [
+        level
+        if level in EVIDENCE_LEVEL_STRENGTH
+        else "exploratory"
+        for level in levels
+    ]
+
+    return min(
+        normalized,
+        key=lambda level: EVIDENCE_LEVEL_STRENGTH[level],
+    )
+
+
+def _target_transfer_assessment(
+    target: dict[str, Any],
+) -> dict[str, Any]:
+    """Grade whether reference-target activity can transfer to the query."""
+    route = str(
+        target.get("target_resolution_route") or ""
+    ).strip()
+
+    identity = _normalize_similarity_metric(
+        target.get("sequence_identity")
+    )
+    query_coverage = _normalize_similarity_metric(
+        target.get("sequence_query_coverage")
+    )
+
+    reasons: list[str] = []
+
+    if route in {
+        "direct_target",
+        "exact_target",
+        "submitted_target",
+    }:
+        level = "strong"
+        reasons.append(
+            "The activity target was resolved as the submitted "
+            "or exact target."
+        )
+
+    elif route == "sequence_alignment":
+        if identity is None or query_coverage is None:
+            level = "exploratory"
+            reasons.append(
+                "Sequence alignment was reported, but identity or "
+                "query coverage was unavailable."
+            )
+
+        elif identity >= 0.90 and query_coverage >= 0.80:
+            level = "strong"
+            reasons.append(
+                "Reference-target transfer is supported by at least "
+                "90% sequence identity and 80% query coverage."
+            )
+
+        elif identity >= 0.70 and query_coverage >= 0.70:
+            level = "moderate"
+            reasons.append(
+                "Reference-target transfer has substantial, but not "
+                "near-exact, sequence support."
+            )
+
+        elif identity >= 0.40 and query_coverage >= 0.50:
+            level = "weak"
+            reasons.append(
+                "Reference-target transfer has limited sequence "
+                "support and requires structural review."
+            )
+
+        else:
+            level = "exploratory"
+            reasons.append(
+                "Sequence identity or query coverage is too low for "
+                "confident activity transfer."
+            )
+
+    elif route == "text_search_fallback":
+        level = "exploratory"
+        reasons.append(
+            "The ChEMBL target was resolved through text search only; "
+            "no qualifying sequence match was established."
+        )
+
+    else:
+        level = "exploratory"
+        reasons.append(
+            "The reference-target resolution route does not provide "
+            "validated sequence-transfer support."
+        )
+
+    return {
+        "level": level,
+        "resolution_route": route or None,
+        "sequence_identity_fraction": identity,
+        "sequence_query_coverage_fraction": query_coverage,
+        "reasons": reasons,
+    }
+
+
+def _assay_compatibility_assessment(
+    activity: dict[str, Any],
+) -> dict[str, Any]:
+    """Detect assays that should not be treated as pocket inhibition."""
+    description = str(
+        activity.get("assay_description") or ""
+    ).strip()
+
+    normalized_description = description.lower()
+
+    interaction_markers = (
+        "protein-protein interaction",
+        "protein protein interaction",
+        "two-hybrid",
+        "two hybrid",
+        "protein interaction assay",
+        "inhibition of interaction between",
+        "disruption of interaction between",
+    )
+
+    detected_markers = [
+        marker
+        for marker in interaction_markers
+        if marker in normalized_description
+    ]
+
+    if detected_markers:
+        return {
+            "status": "mechanism_mismatch",
+            "level_cap": "exploratory",
+            "reasons": [
+                "The assay description indicates a protein-protein "
+                "interaction mechanism that is not automatically "
+                "equivalent to inhibition of a catalytic pocket."
+            ],
+            "detected_markers": detected_markers,
+        }
+
+    return {
+        "status": "compatible_or_unspecified",
+        "level_cap": "strong",
+        "reasons": [
+            "No explicit protein-protein interaction mechanism "
+            "mismatch was detected in the assay description."
+        ],
+        "detected_markers": [],
+    }
 
 
 def _activity_evidence_category(
@@ -1767,6 +1944,59 @@ def make_chembl_candidate(
         )
     )
 
+    potency_evidence_level = _evidence_level(
+        pchembl_value
+    )
+
+    target_transfer = _target_transfer_assessment(
+        target
+    )
+
+    assay_compatibility = (
+        _assay_compatibility_assessment(
+            activity
+        )
+    )
+
+    final_evidence_level = _weakest_evidence_level(
+        potency_evidence_level,
+        str(target_transfer["level"]),
+        str(assay_compatibility["level_cap"]),
+    )
+
+    evidence_grading_reasons = [
+        (
+            f"Measured potency corresponds to "
+            f"{potency_evidence_level} potency evidence "
+            f"(pChEMBL={pchembl_value:g})."
+        ),
+        *target_transfer["reasons"],
+        *assay_compatibility["reasons"],
+        (
+            "The final evidence level is the most conservative "
+            "of potency, target-transfer, and assay-compatibility "
+            "support."
+        ),
+    ]
+
+    automatic_docking_eligible = (
+        target_transfer["level"] != "exploratory"
+        and assay_compatibility["status"]
+        != "mechanism_mismatch"
+    )
+
+    if automatic_docking_eligible:
+        docking_selection_reason = (
+            "Sequence-supported target transfer and no explicit "
+            "assay-mechanism mismatch were identified."
+        )
+    else:
+        docking_selection_reason = (
+            "Automatic docking was withheld because target transfer "
+            "is exploratory or the assay mechanism requires manual "
+            "review."
+        )
+
     return {
         "compound_name": compound_name,
         "retrieval_rank": None,
@@ -1862,8 +2092,23 @@ def make_chembl_candidate(
             or None
         ),
 
-        "evidence_level": _evidence_level(
-            pchembl_value
+        "potency_evidence_level": (
+            potency_evidence_level
+        ),
+        "target_transfer_level": (
+            target_transfer["level"]
+        ),
+        "target_transfer_assessment": (
+            target_transfer
+        ),
+        "assay_compatibility": (
+            assay_compatibility
+        ),
+        "evidence_level": (
+            final_evidence_level
+        ),
+        "evidence_grading_reasons": (
+            evidence_grading_reasons
         ),
         "primary_activity_evidence_category": (
             activity_record[
@@ -1925,7 +2170,12 @@ def make_chembl_candidate(
         ),
         "structure_fetch_error": None,
         "local_sdf_path": None,
-        "selected_for_docking": True,
+        "selected_for_docking": (
+            automatic_docking_eligible
+        ),
+        "docking_selection_reason": (
+            docking_selection_reason
+        ),
         "mutation_relevance": {
             "status": "not_evaluated",
             "pocket_mutation_overlap": None,
