@@ -7,6 +7,7 @@ from rdkit.Geometry import Point3D
 
 from compoundrank.models import PoseRecord
 from compoundrank.pipeline import (
+    _accepted_records_for_selected_pocket,
     _run_selected_pocket_pose_recovery,
 )
 
@@ -191,6 +192,64 @@ class PipelinePoseRecoveryTests(
                 self.assertTrue(
                     output_path.exists()
                 )
+
+    def test_only_selected_pocket_records_feed_hypotheses(
+        self,
+    ) -> None:
+        selected_record = PoseRecord(
+            ligand_name="example",
+            seed=100,
+            pose_number=1,
+            molecule=None,
+            cnn_score=0.30,
+            cnn_affinity=4.0,
+            minimized_affinity=-5.0,
+            source_sdf=Path(
+                "selected/poses.sdf"
+            ),
+            pocket_id="selected_pocket",
+        )
+
+        false_high_score_record = PoseRecord(
+            ligand_name="example",
+            seed=100,
+            pose_number=1,
+            molecule=None,
+            cnn_score=0.99,
+            cnn_affinity=9.0,
+            minimized_affinity=-8.0,
+            source_sdf=Path(
+                "false/poses.sdf"
+            ),
+            pocket_id="false_pocket",
+        )
+
+        records = (
+            _accepted_records_for_selected_pocket(
+                valid_records_by_pocket={
+                    "selected_pocket": [
+                        selected_record
+                    ],
+                    "false_pocket": [
+                        false_high_score_record
+                    ],
+                },
+                selected_pocket_id=(
+                    "selected_pocket"
+                ),
+            )
+        )
+
+        self.assertEqual(
+            records,
+            [selected_record],
+        )
+
+        self.assertNotIn(
+            false_high_score_record,
+            records,
+        )
+
 
 
 if __name__ == "__main__":

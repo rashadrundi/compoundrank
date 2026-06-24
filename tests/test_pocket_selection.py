@@ -200,6 +200,148 @@ class PocketSelectionTests(unittest.TestCase):
                 "pocket_3",
             )
 
+    def test_accepted_pose_outweighs_raw_fallback(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "compound": "example",
+                "pocket_id": "raw_high",
+                "pocket_rank": 1,
+                "raw_poses": 9,
+                "accepted_poses": 0,
+                "score_source": (
+                    "raw_pose_fallback"
+                ),
+                "top_cnn_score": 0.99,
+                "top_cnn_affinity": 10.0,
+                "top_minimized_affinity": -9.0,
+            },
+            {
+                "compound": "example",
+                "pocket_id": "accepted_lower",
+                "pocket_rank": 2,
+                "raw_poses": 9,
+                "accepted_poses": 9,
+                "score_source": (
+                    "accepted_poses"
+                ),
+                "top_cnn_score": 0.50,
+                "top_cnn_affinity": 5.0,
+                "top_minimized_affinity": -5.0,
+            },
+        ]
+
+        ranked = rank_pocket_attempts(
+            rows
+        )
+
+        self.assertEqual(
+            ranked[0]["pocket_id"],
+            "accepted_lower",
+        )
+
+    def test_biological_support_precedes_higher_cnn(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "compound": "example",
+                "pocket_id": "unsupported",
+                "pocket_rank": 1,
+                "raw_poses": 9,
+                "accepted_poses": 9,
+                "score_source": (
+                    "accepted_poses"
+                ),
+                "biological_evidence_used_for_selection": True,
+                "biological_evidence_supported": False,
+                "biological_evidence_overlap_count": 0,
+                "biological_evidence_recall": 0.0,
+                "biological_evidence_precision": 0.0,
+                "biological_evidence_jaccard": 0.0,
+                "top_cnn_score": 0.99,
+                "top_cnn_affinity": 10.0,
+                "top_minimized_affinity": -9.0,
+            },
+            {
+                "compound": "example",
+                "pocket_id": "supported",
+                "pocket_rank": 4,
+                "raw_poses": 9,
+                "accepted_poses": 9,
+                "score_source": (
+                    "accepted_poses"
+                ),
+                "biological_evidence_used_for_selection": True,
+                "biological_evidence_supported": True,
+                "biological_evidence_overlap_count": 4,
+                "biological_evidence_recall": 0.8,
+                "biological_evidence_precision": 0.5,
+                "biological_evidence_jaccard": 0.4,
+                "top_cnn_score": 0.30,
+                "top_cnn_affinity": 4.0,
+                "top_minimized_affinity": -5.0,
+            },
+        ]
+
+        ranked = rank_pocket_attempts(
+            rows
+        )
+
+        self.assertEqual(
+            ranked[0]["pocket_id"],
+            "supported",
+        )
+
+    def test_report_only_evidence_does_not_change_cnn_order(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "compound": "example",
+                "pocket_id": "higher_cnn",
+                "pocket_rank": 1,
+                "raw_poses": 9,
+                "accepted_poses": 9,
+                "score_source": (
+                    "accepted_poses"
+                ),
+                "biological_evidence_used_for_selection": False,
+                "biological_evidence_supported": False,
+                "biological_evidence_recall": 0.0,
+                "top_cnn_score": 0.90,
+                "top_cnn_affinity": 8.0,
+                "top_minimized_affinity": -7.0,
+            },
+            {
+                "compound": "example",
+                "pocket_id": "reported_support",
+                "pocket_rank": 2,
+                "raw_poses": 9,
+                "accepted_poses": 9,
+                "score_source": (
+                    "accepted_poses"
+                ),
+                "biological_evidence_used_for_selection": False,
+                "biological_evidence_supported": True,
+                "biological_evidence_recall": 1.0,
+                "top_cnn_score": 0.20,
+                "top_cnn_affinity": 3.0,
+                "top_minimized_affinity": -4.0,
+            },
+        ]
+
+        ranked = rank_pocket_attempts(
+            rows
+        )
+
+        self.assertEqual(
+            ranked[0]["pocket_id"],
+            "higher_cnn",
+        )
+
+
 
 if __name__ == "__main__":
     unittest.main()

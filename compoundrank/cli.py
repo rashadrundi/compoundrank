@@ -144,6 +144,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    parser.add_argument(
+        "--pocket-evidence-json",
+        default=None,
+        help=(
+            "Optional pocket_evidence.v0.1 JSON containing "
+            "curated, homolog-transferred, or expert-supplied "
+            "functional residues. The file controls whether "
+            "evidence is report-only or may prioritize "
+            "biologically supported pockets."
+        ),
+    )
+
     parser.add_argument("--seeds", nargs="+", type=int, default=[2026, 3101, 4202])
     parser.add_argument("--exhaustiveness", type=int, default=32)
     parser.add_argument("--num-modes", type=int, default=20)
@@ -346,6 +358,13 @@ def main(argv: list[str] | None = None) -> int:
         ),
         fpocket_merge_distance=(
             args.fpocket_merge_distance
+        ),
+        pocket_evidence_json=(
+            Path(
+                args.pocket_evidence_json
+            ).expanduser().resolve()
+            if args.pocket_evidence_json
+            else None
         ),
         max_hypotheses=args.max_hypotheses,
         cluster_threshold=args.cluster_threshold,

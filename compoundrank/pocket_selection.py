@@ -8,7 +8,9 @@ from typing import Any, Iterable
 from .models import PocketDefinition, PoseRecord
 
 
-def _number_or_none(value: object) -> float | None:
+def _number_or_none(
+    value: object,
+) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
 
@@ -18,7 +20,9 @@ def _number_or_none(value: object) -> float | None:
 def _pose_selection_key(
     record: PoseRecord,
 ) -> tuple[float, float, float]:
-    cnn_score = _number_or_none(record.cnn_score)
+    cnn_score = _number_or_none(
+        record.cnn_score
+    )
     cnn_affinity = _number_or_none(
         record.cnn_affinity
     )
@@ -68,7 +72,9 @@ def summarize_pocket_attempt(
     rejected_pose_count: int,
 ) -> dict[str, Any]:
     raw_list = list(raw_records)
-    accepted_list = list(accepted_records)
+    accepted_list = list(
+        accepted_records
+    )
 
     if accepted_list:
         scoring_records = accepted_list
@@ -80,18 +86,24 @@ def summarize_pocket_attempt(
         scoring_records = []
         score_source = "none"
 
-    best_record = best_pose_record(scoring_records)
+    best_record = best_pose_record(
+        scoring_records
+    )
 
     return {
         "compound": ligand_name,
         "pocket_id": pocket.pocket_id,
         "pocket_rank": pocket.pocket_rank,
-        "fpocket_score": pocket.fpocket_score,
+        "fpocket_score": (
+            pocket.fpocket_score
+        ),
         "pocket_source": (
             pocket.source or pocket.mode
         ),
         "raw_poses": len(raw_list),
-        "accepted_poses": len(accepted_list),
+        "accepted_poses": len(
+            accepted_list
+        ),
         "rejected_poses": int(
             rejected_pose_count
         ),
@@ -126,9 +138,56 @@ def summarize_pocket_attempt(
     }
 
 
+def _pose_validity_priority(
+    row: dict[str, Any],
+) -> float:
+    score_source = str(
+        row.get("score_source") or ""
+    )
+
+    accepted_count = _number_or_none(
+        row.get("accepted_poses")
+    )
+
+    raw_count = _number_or_none(
+        row.get("raw_poses")
+    )
+
+    if (
+        score_source == "accepted_poses"
+        or (
+            accepted_count is not None
+            and accepted_count > 0
+        )
+    ):
+        return 2.0
+
+    if (
+        score_source == "raw_pose_fallback"
+        or (
+            raw_count is not None
+            and raw_count > 0
+        )
+    ):
+        return 1.0
+
+    return 0.0
+
+
 def _row_selection_key(
     row: dict[str, Any],
-) -> tuple[float, float, float, float]:
+) -> tuple[
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+]:
     cnn_score = _number_or_none(
         row.get("top_cnn_score")
     )
@@ -136,13 +195,96 @@ def _row_selection_key(
         row.get("top_cnn_affinity")
     )
     minimized_affinity = _number_or_none(
-        row.get("top_minimized_affinity")
+        row.get(
+            "top_minimized_affinity"
+        )
     )
     pocket_rank = _number_or_none(
         row.get("pocket_rank")
     )
 
+    evidence_used = bool(
+        row.get(
+            "biological_evidence_used_for_selection"
+        )
+    )
+
+    evidence_supported = bool(
+        row.get(
+            "biological_evidence_supported"
+        )
+    )
+
+    evidence_recall = _number_or_none(
+        row.get(
+            "biological_evidence_recall"
+        )
+    )
+
+    evidence_jaccard = _number_or_none(
+        row.get(
+            "biological_evidence_jaccard"
+        )
+    )
+
+    evidence_precision = _number_or_none(
+        row.get(
+            "biological_evidence_precision"
+        )
+    )
+
+    evidence_overlap = _number_or_none(
+        row.get(
+            "biological_evidence_overlap_count"
+        )
+    )
+
     return (
+        _pose_validity_priority(row),
+        (
+            1.0
+            if (
+                evidence_used
+                and evidence_supported
+            )
+            else 0.0
+        ),
+        (
+            evidence_recall
+            if (
+                evidence_used
+                and evidence_recall
+                is not None
+            )
+            else 0.0
+        ),
+        (
+            evidence_jaccard
+            if (
+                evidence_used
+                and evidence_jaccard
+                is not None
+            )
+            else 0.0
+        ),
+        (
+            evidence_precision
+            if (
+                evidence_used
+                and evidence_precision
+                is not None
+            )
+            else 0.0
+        ),
+        (
+            evidence_overlap
+            if (
+                evidence_used
+                and evidence_overlap
+                is not None
+            )
+            else 0.0
+        ),
         (
             cnn_score
             if cnn_score is not None
@@ -183,8 +325,12 @@ def rank_pocket_attempts(
         ranked,
         start=1,
     ):
-        row["selection_rank"] = selection_rank
-        row["selected"] = selection_rank == 1
+        row["selection_rank"] = (
+            selection_rank
+        )
+        row["selected"] = (
+            selection_rank == 1
+        )
 
     return ranked
 
@@ -224,6 +370,20 @@ def write_pocket_selection_summary(
         "accepted_poses",
         "rejected_poses",
         "score_source",
+        "biological_evidence_available",
+        "biological_evidence_used_for_selection",
+        "biological_evidence_supported",
+        "biological_evidence_rank",
+        "biological_evidence_id",
+        "biological_evidence_origin",
+        "biological_evidence_confidence",
+        "biological_evidence_overlap_count",
+        "biological_evidence_recall",
+        "biological_evidence_precision",
+        "biological_evidence_jaccard",
+        "biological_evidence_matched_residues",
+        "pocket_lining_residue_count",
+        "pocket_lining_source_status",
         "top_cnn_score",
         "top_cnn_affinity",
         "top_minimized_affinity",
@@ -243,12 +403,24 @@ def write_pocket_selection_summary(
         writer.writeheader()
 
         for row in row_list:
-            writer.writerow(
-                {
-                    field: row.get(field)
-                    for field in fieldnames
-                }
-            )
+            serialized = {
+                field: row.get(field)
+                for field in fieldnames
+            }
+
+            for field in (
+                "biological_evidence_matched_residues",
+            ):
+                value = serialized.get(
+                    field
+                )
+
+                if isinstance(value, list):
+                    serialized[field] = (
+                        "|".join(value)
+                    )
+
+            writer.writerow(serialized)
 
     selected_rows = [
         row
@@ -256,14 +428,75 @@ def write_pocket_selection_summary(
         if row.get("selected") is True
     ]
 
+    evidence_available = any(
+        bool(
+            row.get(
+                "biological_evidence_available"
+            )
+        )
+        for row in row_list
+    )
+
+    evidence_used = any(
+        bool(
+            row.get(
+                "biological_evidence_used_for_selection"
+            )
+        )
+        for row in row_list
+    )
+
+    if evidence_used:
+        selection_method = (
+            "PoseBusters-accepted poses preferred; "
+            "biologically supported pockets prioritized "
+            "by residue-evidence recall, Jaccard, "
+            "precision, and overlap; GNINA CNNscore, "
+            "CNNaffinity, and minimized affinity used "
+            "after biological support"
+        )
+    else:
+        selection_method = (
+            "PoseBusters-accepted poses preferred over "
+            "raw fallback; highest top-pose CNNscore; "
+            "CNNaffinity then minimized affinity used "
+            "as tie-breakers"
+        )
+
+    first_evidence_row = next(
+        (
+            row
+            for row in row_list
+            if row.get(
+                "biological_evidence_available"
+            )
+        ),
+        {},
+    )
+
     payload = {
         "selection_method": (
-            "highest top-pose CNNscore; "
-            "CNNaffinity then minimized affinity "
-            "used as tie-breakers"
+            selection_method
         ),
         "accepted_poses_preferred": True,
         "raw_pose_fallback_when_no_posebusters_pose": True,
+        "raw_pose_fallback_ranked_below_accepted_poses": True,
+        "biological_evidence_available": (
+            evidence_available
+        ),
+        "biological_evidence_used_for_selection": (
+            evidence_used
+        ),
+        "biological_evidence_id": (
+            first_evidence_row.get(
+                "biological_evidence_id"
+            )
+        ),
+        "biological_evidence_origin": (
+            first_evidence_row.get(
+                "biological_evidence_origin"
+            )
+        ),
         "reference_ligand_used_for_selection": False,
         "compound_count": len(
             {

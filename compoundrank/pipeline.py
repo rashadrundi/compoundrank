@@ -27,6 +27,11 @@ from .pocket import (
     build_pocket_definitions,
     write_pocket_definitions,
 )
+from .pocket_evidence import (
+    load_pocket_evidence,
+    score_pocket_biological_evidence,
+    write_pocket_biological_evidence,
+)
 from .pocket_selection import (
     rank_pocket_attempts,
     summarize_pocket_attempt,
@@ -47,6 +52,24 @@ def _top_score(result: LigandResult) -> float:
     if result.top_score is None:
         return float("-inf")
     return result.top_score
+
+
+def _accepted_records_for_selected_pocket(
+    *,
+    valid_records_by_pocket: dict[
+        str,
+        list[PoseRecord],
+    ],
+    selected_pocket_id: str,
+) -> list[PoseRecord]:
+    """Return only accepted poses from the selected pocket."""
+
+    return list(
+        valid_records_by_pocket.get(
+            selected_pocket_id,
+            [],
+        )
+    )
 
 
 def _output_name(
@@ -476,6 +499,7 @@ def run_pipeline(
     device: int | None,
     fpocket_merge_nearby: bool = False,
     fpocket_merge_distance: float = 4.0,
+    pocket_evidence_json: Path | None = None,
     gnina_timeout_seconds: int | None = 3600,
     fasta_path: Path | None = None,
     homolog_api_url: str = DEFAULT_API_URL,
@@ -518,6 +542,7 @@ def run_pipeline(
             path.unlink()
 
         for filename in (
+            "pocket_biological_evidence.json",
             "pose_recovery_selected_pocket_poses.sdf",
             "pose_set_recovery_summary.json",
             "pose_set_recovery_metrics.csv",
@@ -766,6 +791,53 @@ def run_pipeline(
             f"{pocket_definitions_path}"
         )
 
+        pocket_biological_scores: dict[
+            str,
+            dict[str, object],
+        ] = {}
+
+        if pocket_evidence_json is not None:
+            pocket_evidence = (
+                load_pocket_evidence(
+                    Path(
+                        pocket_evidence_json
+                    )
+                )
+            )
+
+            (
+                pocket_biological_scores,
+                pocket_biological_report,
+            ) = score_pocket_biological_evidence(
+                pockets,
+                fpocket_output_dir=(
+                    work_dir
+                    / "pocket"
+                    / "fpocket_receptor_out"
+                ),
+                evidence=pocket_evidence,
+            )
+
+            biological_report_path = (
+                write_pocket_biological_evidence(
+                    output_dir
+                    / "pocket_biological_evidence.json",
+                    pocket_biological_report,
+                )
+            )
+
+            print(
+                "[POCKET EVIDENCE] "
+                f"Mode={pocket_evidence['selection_mode']}; "
+                f"origin={pocket_evidence['evidence_origin']}; "
+                f"residues="
+                f"{len(pocket_evidence['residues'])}"
+            )
+            print(
+                "[POCKET EVIDENCE] Report: "
+                f"{biological_report_path}"
+            )
+
         ligand_results: list[LigandResult] = []
         docking_attempt_rows: list[dict[str, object]] = []
         pocket_selection_rows: list[dict[str, object]] = []
@@ -858,6 +930,15 @@ def run_pipeline(
                 str,
                 list[PoseRecord],
             ] = {}
+
+            valid_records_by_pocket: dict[
+                str,
+                list[PoseRecord],
+            ] = {}
+
+            records_for_hypotheses: list[
+                PoseRecord
+            ] = []
 
             for pocket in pockets:
                 print(f"\n[POCKET RUN] {ligand.name}: {pocket.pocket_id}")
@@ -959,6 +1040,10 @@ def run_pipeline(
                 total_failures += len(failures)
                 all_valid_records.extend(valid_records)
 
+                valid_records_by_pocket[
+                    pocket.pocket_id
+                ] = list(valid_records)
+
                 print(
                     f"[VALIDITY] {ligand.name} {pocket.pocket_id}: "
                     f"accepted {len(valid_records)}/{len(raw_records)}; "
@@ -978,7 +1063,7 @@ def run_pipeline(
                     }
                 )
 
-                ligand_pocket_rows.append(
+                pocket_attempt_row = (
                     summarize_pocket_attempt(
                         ligand_name=ligand.name,
                         pocket=pocket,
@@ -986,6 +1071,17 @@ def run_pipeline(
                         accepted_records=valid_records,
                         rejected_pose_count=len(failures),
                     )
+                )
+
+                pocket_attempt_row.update(
+                    pocket_biological_scores.get(
+                        pocket.pocket_id,
+                        {},
+                    )
+                )
+
+                ligand_pocket_rows.append(
+                    pocket_attempt_row
                 )
 
             ranked_pocket_rows = rank_pocket_attempts(
@@ -997,6 +1093,22 @@ def run_pipeline(
 
             if ranked_pocket_rows:
                 selected_pocket = ranked_pocket_rows[0]
+
+                selected_pocket_id = str(
+                    selected_pocket["pocket_id"]
+                )
+
+                records_for_hypotheses = (
+                    _accepted_records_for_selected_pocket(
+                        valid_records_by_pocket=(
+                            valid_records_by_pocket
+                        ),
+                        selected_pocket_id=(
+                            selected_pocket_id
+                        ),
+                    )
+                )
+
                 print(
                     "[POCKET SELECTION] "
                     f"{ligand.name}: "
@@ -1010,10 +1122,6 @@ def run_pipeline(
                 )
 
                 if reference_ligand is not None:
-                    selected_pocket_id = str(
-                        selected_pocket["pocket_id"]
-                    )
-
                     selected_records = (
                         raw_records_by_pocket.get(
                             selected_pocket_id,
@@ -1077,7 +1185,7 @@ def run_pipeline(
             print(f"[VALIDITY] Failure records: {total_failures}")
 
             clusters = cluster_pose_hypotheses(
-                all_valid_records,
+                records_for_hypotheses,
                 rmsd_threshold=cluster_threshold,
             )
 
