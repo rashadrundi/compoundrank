@@ -80,6 +80,55 @@ def _best_cnn_score_text(records: list[object]) -> str:
     return f"{max(scores):.9f}"
 
 
+def _preserve_posebusters_artifacts(
+    *,
+    validity_dir: Path,
+    output_dir: Path,
+    ligand_name: str,
+    pocket_id: str,
+) -> list[Path]:
+    """Copy PoseBusters audit inputs and reports to final results."""
+
+    artifact_names = (
+        "posebusters_input.sdf",
+        "posebusters_report.csv",
+    )
+
+    destination_dir = (
+        output_dir
+        / "posebusters_reports"
+        / ligand_name
+        / pocket_id
+    )
+
+    copied_paths: list[Path] = []
+
+    for artifact_name in artifact_names:
+        source_path = (
+            validity_dir / artifact_name
+        )
+
+        if not source_path.is_file():
+            continue
+
+        destination_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        destination_path = (
+            destination_dir / artifact_name
+        )
+
+        destination_path.write_bytes(
+            source_path.read_bytes()
+        )
+
+        copied_paths.append(destination_path)
+
+    return copied_paths
+
+
 def _write_docking_attempt_summary(
     output_dir: Path,
     rows: list[dict[str, object]],
@@ -853,11 +902,18 @@ def run_pipeline(
                     raw_records
                 )
 
+                validity_output_dir = (
+                    work_dir
+                    / "validity"
+                    / ligand.name
+                    / pocket.pocket_id
+                )
+
                 try:
                     valid_records, failures = filter_poses_with_posebusters(
                         raw_records,
                         receptor.display_pdb,
-                        work_dir / "validity" / ligand.name / pocket.pocket_id,
+                        validity_output_dir,
                         posebusters_bin=posebusters_bin,
                         skip=skip_validity,
                     )
@@ -873,6 +929,23 @@ def run_pipeline(
                         "accepted 0/"
                         f"{len(raw_records)}; rejected {len(raw_records)}; "
                         "skipping this exploratory pocket"
+                    )
+
+                preserved_validity_artifacts = (
+                    _preserve_posebusters_artifacts(
+                        validity_dir=validity_output_dir,
+                        output_dir=output_dir,
+                        ligand_name=ligand.name,
+                        pocket_id=pocket.pocket_id,
+                    )
+                )
+
+                for artifact_path in (
+                    preserved_validity_artifacts
+                ):
+                    print(
+                        "[VALIDITY] Preserved audit "
+                        f"artifact: {artifact_path}"
                     )
 
                 total_failures += len(failures)
