@@ -48,6 +48,10 @@ from .reference_evidence_workflow import (
 from .uniprot_acquisition import (
     fetch_uniprot_entry,
 )
+from .uniprot_accession import (
+    resolve_uniprot_accession_from_fasta,
+    write_uniprot_accession_resolution,
+)
 from .uncertainty import assess_uncertainty
 from .validity import filter_poses_with_posebusters
 from .run_report import write_run_report
@@ -510,10 +514,10 @@ def _resolve_pocket_evidence_json(
         )
     )
 
-    if source_count != 1:
+    if source_count > 1:
         raise ValueError(
-            "Automatic reference evidence requires "
-            "exactly one UniProt accession or "
+            "Automatic reference evidence accepts "
+            "at most one UniProt accession or "
             "UniProt JSON file."
         )
 
@@ -522,6 +526,16 @@ def _resolve_pocket_evidence_json(
             "Reference-evidence timeout must be "
             "greater than zero."
         )
+
+    workflow_output = (
+        output_dir
+        / "automatic_reference_evidence"
+    )
+
+    workflow_output.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     if reference_uniprot_json is not None:
         source_path = Path(
@@ -541,21 +555,65 @@ def _resolve_pocket_evidence_json(
             ),
         }
     else:
+        accession_resolution = None
+
+        if reference_uniprot_accession is None:
+            accession_resolution = (
+                resolve_uniprot_accession_from_fasta(
+                    Path(fasta_path)
+                )
+            )
+
+            resolved_accession = str(
+                accession_resolution[
+                    "selected_accession"
+                ]
+            )
+
+            resolution_path = (
+                write_uniprot_accession_resolution(
+                    workflow_output
+                    / (
+                        "uniprot_accession_"
+                        "resolution.json"
+                    ),
+                    accession_resolution,
+                )
+            )
+
+            print(
+                "[REFERENCE EVIDENCE] "
+                "Resolved UniProt accession "
+                f"{resolved_accession} from "
+                f"{accession_resolution['resolution_method']}"
+            )
+
+            print(
+                "[REFERENCE EVIDENCE] "
+                "Accession resolution: "
+                f"{resolution_path}"
+            )
+        else:
+            resolved_accession = str(
+                reference_uniprot_accession
+            )
+
         payload, response_metadata = (
             fetch_uniprot_entry(
-                str(
-                    reference_uniprot_accession
-                ),
+                resolved_accession,
                 timeout_seconds=(
                     reference_evidence_timeout_seconds
                 ),
             )
         )
 
-    workflow_output = (
-        output_dir
-        / "automatic_reference_evidence"
-    )
+        if accession_resolution is not None:
+            response_metadata = {
+                **response_metadata,
+                "accession_resolution": (
+                    accession_resolution
+                ),
+            }
 
     print(
         "[REFERENCE EVIDENCE] Generating "

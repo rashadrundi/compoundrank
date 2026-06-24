@@ -212,6 +212,70 @@ class CliAutoReferenceEvidenceTests(
                 45.0,
             )
 
+    def test_fasta_only_reference_source_is_allowed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            receptor = root / "receptor.pdb"
+            fasta = (
+                root / "protein_Q6DPL2.faa"
+            )
+            ligand = root / "ligand.sdf"
+
+            receptor.write_text(
+                "END\n",
+                encoding="utf-8",
+            )
+
+            fasta.write_text(
+                ">protein\nAAAA\n",
+                encoding="utf-8",
+            )
+
+            ligand.write_text(
+                "ligand\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "compoundrank.cli.run_pipeline"
+            ) as mocked:
+                main(
+                    [
+                        "--receptor",
+                        str(receptor),
+                        "--data-root",
+                        str(root / "data"),
+                        "--fasta",
+                        str(fasta),
+                        "--ligand-file",
+                        str(ligand),
+                        "--auto-reference-evidence",
+                    ]
+                )
+
+            kwargs = mocked.call_args.kwargs
+
+            self.assertTrue(
+                kwargs[
+                    "auto_reference_evidence"
+                ]
+            )
+
+            self.assertIsNone(
+                kwargs[
+                    "reference_uniprot_accession"
+                ]
+            )
+
+            self.assertIsNone(
+                kwargs[
+                    "reference_uniprot_json"
+                ]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

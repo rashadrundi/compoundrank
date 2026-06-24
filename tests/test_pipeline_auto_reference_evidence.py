@@ -150,6 +150,130 @@ class PipelineAutoReferenceEvidenceTests(
                 fasta,
             )
 
+    def test_fasta_accession_is_resolved_when_source_omitted(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            fasta = (
+                root / "protein_Q6DPL2.faa"
+            )
+            receptor = root / "receptor.pdb"
+            output = root / "output"
+            generated = (
+                output
+                / "automatic_reference_evidence"
+                / "pocket_evidence.json"
+            )
+
+            fasta.write_text(
+                ">protein\nAAAA\n",
+                encoding="utf-8",
+            )
+
+            receptor.write_text(
+                "END\n",
+                encoding="utf-8",
+            )
+
+            resolution = {
+                "schema_version": (
+                    "uniprot_accession_"
+                    "resolution.v0.1"
+                ),
+                "status": "resolved",
+                "selected_accession": (
+                    "Q6DPL2"
+                ),
+                "resolution_method": (
+                    "filename_token"
+                ),
+            }
+
+            payload = {
+                "primaryAccession": (
+                    "Q6DPL2"
+                )
+            }
+
+            with patch(
+                "compoundrank.pipeline."
+                "resolve_uniprot_accession_from_fasta",
+                return_value=resolution,
+            ) as resolver, patch(
+                "compoundrank.pipeline."
+                "fetch_uniprot_entry",
+                return_value=(
+                    payload,
+                    {
+                        "source": (
+                            "uniprot_rest"
+                        )
+                    },
+                ),
+            ) as fetcher, patch(
+                "compoundrank.pipeline."
+                "run_reference_evidence_workflow",
+                return_value={
+                    "pocket_evidence_path": (
+                        str(generated)
+                    )
+                },
+            ) as workflow:
+                resolved = (
+                    _resolve_pocket_evidence_json(
+                        pocket_evidence_json=None,
+                        auto_reference_evidence=True,
+                        reference_uniprot_accession=None,
+                        reference_uniprot_json=None,
+                        reference_pdb_id=None,
+                        reference_chain_id=None,
+                        receptor_chain_id="B",
+                        reference_pdb=None,
+                        reference_evidence_timeout_seconds=(
+                            60.0
+                        ),
+                        fasta_path=fasta,
+                        receptor_pdb=receptor,
+                        output_dir=output,
+                    )
+                )
+
+            self.assertEqual(
+                resolved,
+                generated,
+            )
+
+            resolver.assert_called_once_with(
+                fasta
+            )
+
+            fetcher.assert_called_once_with(
+                "Q6DPL2",
+                timeout_seconds=60.0,
+            )
+
+            self.assertEqual(
+                workflow.call_args.kwargs[
+                    "payload"
+                ],
+                payload,
+            )
+
+            resolution_path = (
+                output
+                / "automatic_reference_evidence"
+                / (
+                    "uniprot_accession_"
+                    "resolution.json"
+                )
+            )
+
+            self.assertTrue(
+                resolution_path.is_file()
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

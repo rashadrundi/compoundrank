@@ -171,8 +171,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--reference-uniprot-accession",
         default=None,
         help=(
-            "UniProt accession used by "
-            "--auto-reference-evidence."
+            "Optional UniProt accession override for "
+            "--auto-reference-evidence. When omitted, "
+            "EXORCIST attempts conservative discovery from "
+            "the submitted FASTA header or filename."
         ),
     )
 
@@ -180,8 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--reference-uniprot-json",
         default=None,
         help=(
-            "Previously downloaded UniProt JSON used instead "
-            "of live accession retrieval."
+            "Optional previously downloaded UniProt JSON "
+            "used instead of accession discovery or live "
+            "UniProt retrieval."
         ),
     )
 
@@ -323,9 +326,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-        if source_count != 1:
+        if source_count > 1:
             raise ValueError(
-                "--auto-reference-evidence requires exactly "
+                "--auto-reference-evidence accepts at most "
                 "one of --reference-uniprot-accession or "
                 "--reference-uniprot-json"
             )
