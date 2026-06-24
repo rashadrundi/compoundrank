@@ -42,6 +42,12 @@ from .pose_recovery import (
     write_scored_pose_outputs,
 )
 from .receptor import prepare_receptor
+from .reference_evidence_workflow import (
+    run_reference_evidence_workflow,
+)
+from .uniprot_acquisition import (
+    fetch_uniprot_entry,
+)
 from .uncertainty import assess_uncertainty
 from .validity import filter_poses_with_posebusters
 from .run_report import write_run_report
@@ -462,6 +468,145 @@ def _write_ligand_eligibility_report(
     return csv_path, json_path
 
 
+def _resolve_pocket_evidence_json(
+    *,
+    pocket_evidence_json: Path | None,
+    auto_reference_evidence: bool,
+    reference_uniprot_accession: str | None,
+    reference_uniprot_json: Path | None,
+    reference_pdb_id: str | None,
+    reference_chain_id: str | None,
+    receptor_chain_id: str | None,
+    reference_pdb: Path | None,
+    reference_evidence_timeout_seconds: float,
+    fasta_path: Path | None,
+    receptor_pdb: Path,
+    output_dir: Path,
+) -> Path | None:
+    if not auto_reference_evidence:
+        return (
+            Path(pocket_evidence_json)
+            if pocket_evidence_json is not None
+            else None
+        )
+
+    if pocket_evidence_json is not None:
+        raise ValueError(
+            "Automatic reference evidence cannot be "
+            "combined with manual pocket evidence."
+        )
+
+    if fasta_path is None:
+        raise ValueError(
+            "Automatic reference evidence requires "
+            "a submitted FASTA file."
+        )
+
+    source_count = sum(
+        value is not None
+        for value in (
+            reference_uniprot_accession,
+            reference_uniprot_json,
+        )
+    )
+
+    if source_count != 1:
+        raise ValueError(
+            "Automatic reference evidence requires "
+            "exactly one UniProt accession or "
+            "UniProt JSON file."
+        )
+
+    if reference_evidence_timeout_seconds <= 0:
+        raise ValueError(
+            "Reference-evidence timeout must be "
+            "greater than zero."
+        )
+
+    if reference_uniprot_json is not None:
+        source_path = Path(
+            reference_uniprot_json
+        )
+
+        payload = json.loads(
+            source_path.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        response_metadata = {
+            "source": "input_json",
+            "input_path": str(
+                source_path
+            ),
+        }
+    else:
+        payload, response_metadata = (
+            fetch_uniprot_entry(
+                str(
+                    reference_uniprot_accession
+                ),
+                timeout_seconds=(
+                    reference_evidence_timeout_seconds
+                ),
+            )
+        )
+
+    workflow_output = (
+        output_dir
+        / "automatic_reference_evidence"
+    )
+
+    print(
+        "[REFERENCE EVIDENCE] Generating "
+        "automatic biological pocket evidence"
+    )
+
+    result = run_reference_evidence_workflow(
+        payload=payload,
+        submitted_fasta=Path(
+            fasta_path
+        ),
+        receptor_pdb=Path(
+            receptor_pdb
+        ),
+        output_dir=workflow_output,
+        response_metadata=(
+            response_metadata
+        ),
+        requested_pdb_id=(
+            reference_pdb_id
+        ),
+        reference_chain_id=(
+            reference_chain_id
+        ),
+        receptor_chain_id=(
+            receptor_chain_id
+        ),
+        reference_pdb=(
+            Path(reference_pdb)
+            if reference_pdb is not None
+            else None
+        ),
+        timeout_seconds=(
+            reference_evidence_timeout_seconds
+        ),
+    )
+
+    evidence_path = Path(
+        result[
+            "pocket_evidence_path"
+        ]
+    )
+
+    print(
+        "[REFERENCE EVIDENCE] "
+        f"Generated: {evidence_path}"
+    )
+
+    return evidence_path
+
+
 def run_pipeline(
     *,
     receptor_pdb: Path,
@@ -500,6 +645,14 @@ def run_pipeline(
     fpocket_merge_nearby: bool = False,
     fpocket_merge_distance: float = 4.0,
     pocket_evidence_json: Path | None = None,
+    auto_reference_evidence: bool = False,
+    reference_uniprot_accession: str | None = None,
+    reference_uniprot_json: Path | None = None,
+    reference_pdb_id: str | None = None,
+    reference_chain_id: str | None = None,
+    receptor_chain_id: str | None = None,
+    reference_pdb: Path | None = None,
+    reference_evidence_timeout_seconds: float = 60.0,
     gnina_timeout_seconds: int | None = 3600,
     fasta_path: Path | None = None,
     homolog_api_url: str = DEFAULT_API_URL,
@@ -552,6 +705,41 @@ def run_pipeline(
 
             if stale_path.exists():
                 stale_path.unlink()
+
+    effective_pocket_evidence_json = (
+        _resolve_pocket_evidence_json(
+            pocket_evidence_json=(
+                pocket_evidence_json
+            ),
+            auto_reference_evidence=(
+                auto_reference_evidence
+            ),
+            reference_uniprot_accession=(
+                reference_uniprot_accession
+            ),
+            reference_uniprot_json=(
+                reference_uniprot_json
+            ),
+            reference_pdb_id=(
+                reference_pdb_id
+            ),
+            reference_chain_id=(
+                reference_chain_id
+            ),
+            receptor_chain_id=(
+                receptor_chain_id
+            ),
+            reference_pdb=(
+                reference_pdb
+            ),
+            reference_evidence_timeout_seconds=(
+                reference_evidence_timeout_seconds
+            ),
+            fasta_path=fasta_path,
+            receptor_pdb=receptor_pdb,
+            output_dir=output_dir,
+        )
+    )
 
     homology_executor: ThreadPoolExecutor | None = None
     homology_future = None
@@ -796,11 +984,11 @@ def run_pipeline(
             dict[str, object],
         ] = {}
 
-        if pocket_evidence_json is not None:
+        if effective_pocket_evidence_json is not None:
             pocket_evidence = (
                 load_pocket_evidence(
                     Path(
-                        pocket_evidence_json
+                        effective_pocket_evidence_json
                     )
                 )
             )

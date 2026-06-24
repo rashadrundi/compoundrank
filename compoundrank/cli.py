@@ -156,6 +156,80 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    parser.add_argument(
+        "--auto-reference-evidence",
+        action="store_true",
+        help=(
+            "Automatically acquire UniProt functional-site "
+            "annotations, select a linked PDB reference, "
+            "transfer the residues to the submitted receptor, "
+            "and use the generated pocket evidence."
+        ),
+    )
+
+    parser.add_argument(
+        "--reference-uniprot-accession",
+        default=None,
+        help=(
+            "UniProt accession used by "
+            "--auto-reference-evidence."
+        ),
+    )
+
+    parser.add_argument(
+        "--reference-uniprot-json",
+        default=None,
+        help=(
+            "Previously downloaded UniProt JSON used instead "
+            "of live accession retrieval."
+        ),
+    )
+
+    parser.add_argument(
+        "--reference-pdb-id",
+        default=None,
+        help=(
+            "Optional override for the automatically ranked "
+            "UniProt-linked PDB structure."
+        ),
+    )
+
+    parser.add_argument(
+        "--reference-chain",
+        default=None,
+        help=(
+            "Optional chain override for the reference PDB."
+        ),
+    )
+
+    parser.add_argument(
+        "--receptor-chain",
+        default=None,
+        help=(
+            "Optional receptor chain onto which functional "
+            "residues should be transferred."
+        ),
+    )
+
+    parser.add_argument(
+        "--reference-pdb",
+        default=None,
+        help=(
+            "Optional local PDB file for the selected "
+            "reference structure instead of downloading it."
+        ),
+    )
+
+    parser.add_argument(
+        "--reference-evidence-timeout-seconds",
+        type=float,
+        default=60.0,
+        help=(
+            "Timeout for UniProt and PDB retrieval during "
+            "automatic reference-evidence generation."
+        ),
+    )
+
     parser.add_argument("--seeds", nargs="+", type=int, default=[2026, 3101, 4202])
     parser.add_argument("--exhaustiveness", type=int, default=32)
     parser.add_argument("--num-modes", type=int, default=20)
@@ -219,6 +293,57 @@ def main(argv: list[str] | None = None) -> int:
     if receptor.suffix.lower() != ".pdb":
         raise ValueError("--receptor must be a PDB file")
     data_root = require_absolute_external_dir(args.data_root, "Data root", create=True)
+
+    automatic_reference_options = (
+        args.reference_uniprot_accession,
+        args.reference_uniprot_json,
+        args.reference_pdb_id,
+        args.reference_chain,
+        args.receptor_chain,
+        args.reference_pdb,
+    )
+
+    if args.auto_reference_evidence:
+        if args.pocket_evidence_json:
+            raise ValueError(
+                "--auto-reference-evidence cannot be combined "
+                "with --pocket-evidence-json"
+            )
+
+        if args.fasta is None:
+            raise ValueError(
+                "--auto-reference-evidence requires --fasta"
+            )
+
+        source_count = sum(
+            value is not None
+            for value in (
+                args.reference_uniprot_accession,
+                args.reference_uniprot_json,
+            )
+        )
+
+        if source_count != 1:
+            raise ValueError(
+                "--auto-reference-evidence requires exactly "
+                "one of --reference-uniprot-accession or "
+                "--reference-uniprot-json"
+            )
+
+        if args.reference_evidence_timeout_seconds <= 0:
+            raise ValueError(
+                "--reference-evidence-timeout-seconds must "
+                "be greater than zero"
+            )
+
+    elif any(
+        value is not None
+        for value in automatic_reference_options
+    ):
+        raise ValueError(
+            "Automatic reference-evidence options require "
+            "--auto-reference-evidence"
+        )
 
     if args.output_dir:
         output_dir = require_absolute_external_dir(
@@ -303,6 +428,31 @@ def main(argv: list[str] | None = None) -> int:
             "--pose-recovery-rmsd-threshold must be greater than zero"
         )
 
+    reference_uniprot_json = None
+
+    if args.reference_uniprot_json:
+        reference_uniprot_json = (
+            require_absolute_external_file(
+                args.reference_uniprot_json,
+                "Reference UniProt JSON",
+            )
+        )
+
+    reference_pdb = None
+
+    if args.reference_pdb:
+        reference_pdb = (
+            require_absolute_external_file(
+                args.reference_pdb,
+                "Reference PDB",
+            )
+        )
+
+        if reference_pdb.suffix.lower() != ".pdb":
+            raise ValueError(
+                "--reference-pdb must be a PDB file"
+            )
+
     center_x = args.center_x
     center_y = args.center_y
     center_z = args.center_z
@@ -365,6 +515,28 @@ def main(argv: list[str] | None = None) -> int:
             ).expanduser().resolve()
             if args.pocket_evidence_json
             else None
+        ),
+        auto_reference_evidence=(
+            args.auto_reference_evidence
+        ),
+        reference_uniprot_accession=(
+            args.reference_uniprot_accession
+        ),
+        reference_uniprot_json=(
+            reference_uniprot_json
+        ),
+        reference_pdb_id=(
+            args.reference_pdb_id
+        ),
+        reference_chain_id=(
+            args.reference_chain
+        ),
+        receptor_chain_id=(
+            args.receptor_chain
+        ),
+        reference_pdb=reference_pdb,
+        reference_evidence_timeout_seconds=(
+            args.reference_evidence_timeout_seconds
         ),
         max_hypotheses=args.max_hypotheses,
         cluster_threshold=args.cluster_threshold,
