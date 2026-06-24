@@ -123,6 +123,26 @@ def build_parser() -> argparse.ArgumentParser:
             "fpocket pockets instead of only the highest-scoring pocket."
         ),
     )
+    parser.add_argument(
+        "--fpocket-merge-nearby",
+        action="store_true",
+        help=(
+            "Append pairwise merged boxes for selected "
+            "fpocket pockets whose closest alpha-sphere "
+            "vertices are within the merge threshold. "
+            "Independent top-N pockets remain available."
+        ),
+    )
+    parser.add_argument(
+        "--fpocket-merge-distance",
+        type=float,
+        default=4.0,
+        help=(
+            "Maximum alpha-sphere vertex distance in "
+            "angstroms for constructing a merged "
+            "fpocket candidate."
+        ),
+    )
 
     parser.add_argument("--seeds", nargs="+", type=int, default=[2026, 3101, 4202])
     parser.add_argument("--exhaustiveness", type=int, default=32)
@@ -321,6 +341,12 @@ def main(argv: list[str] | None = None) -> int:
         fpocket_padding=args.fpocket_padding,
         fpocket_pocket=args.fpocket_pocket,
         fpocket_top_n=args.fpocket_top_n,
+        fpocket_merge_nearby=(
+            args.fpocket_merge_nearby
+        ),
+        fpocket_merge_distance=(
+            args.fpocket_merge_distance
+        ),
         max_hypotheses=args.max_hypotheses,
         cluster_threshold=args.cluster_threshold,
         exhaustiveness=args.exhaustiveness,

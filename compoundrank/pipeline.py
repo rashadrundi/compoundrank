@@ -474,6 +474,8 @@ def run_pipeline(
     overwrite: bool,
     cpu: int | None,
     device: int | None,
+    fpocket_merge_nearby: bool = False,
+    fpocket_merge_distance: float = 4.0,
     gnina_timeout_seconds: int | None = 3600,
     fasta_path: Path | None = None,
     homolog_api_url: str = DEFAULT_API_URL,
@@ -743,6 +745,12 @@ def run_pipeline(
             fpocket_pocket=fpocket_pocket,
             fpocket_top_n=fpocket_top_n,
             fpocket_bin=fpocket_bin,
+            fpocket_merge_nearby=(
+                fpocket_merge_nearby
+            ),
+            fpocket_merge_distance=(
+                fpocket_merge_distance
+            ),
         )
 
         print(f"[POCKET] Testing {len(pockets)} pocket definition(s)")

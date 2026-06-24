@@ -19,6 +19,10 @@ class PocketDefinition:
     pocket_id: str = "pocket_01"
     pocket_rank: int = 1
     fpocket_score: float | None = None
+    merged_from: tuple[str, ...] = field(
+        default_factory=tuple
+    )
+    merge_distance: float | None = None
 
     def as_gnina_args(self, autobox_add: float = 4.0) -> list[str]:
         if self.mode == "autobox":

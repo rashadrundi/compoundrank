@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -87,36 +88,279 @@ def _coordinate_file_for_pocket(out_dir: Path, pocket_number: int) -> Path:
     return pocket_file
 
 
-def _box_from_pocket_file(
-    pocket_file: Path,
+
+def _box_from_coordinates(
+    coordinates: np.ndarray,
     *,
     padding: float,
     minimum_size: float = 20.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     if padding < 0:
-        raise ValueError("Pocket padding cannot be negative")
+        raise ValueError(
+            "Pocket padding cannot be negative"
+        )
 
     if minimum_size <= 0:
         raise ValueError(
             "Pocket minimum size must be greater than zero"
         )
 
-    coordinates = _read_pdb_coordinates(pocket_file)
-    minimum = coordinates.min(axis=0)
-    maximum = coordinates.max(axis=0)
+    coordinate_array = np.asarray(
+        coordinates,
+        dtype=float,
+    )
+
+    if (
+        coordinate_array.ndim != 2
+        or coordinate_array.shape[0] == 0
+        or coordinate_array.shape[1] != 3
+    ):
+        raise ValueError(
+            "Pocket coordinates must be a non-empty N x 3 array"
+        )
+
+    minimum = coordinate_array.min(axis=0)
+    maximum = coordinate_array.max(axis=0)
+
     center = (minimum + maximum) / 2.0
     size = maximum - minimum + 2.0 * padding
 
     size = np.maximum(
         size,
         np.asarray(
-            [minimum_size, minimum_size, minimum_size],
+            [
+                minimum_size,
+                minimum_size,
+                minimum_size,
+            ],
             dtype=float,
         ),
     )
 
     return center, size
 
+
+def _minimum_coordinate_distance(
+    first: np.ndarray,
+    second: np.ndarray,
+) -> float:
+    first_array = np.asarray(
+        first,
+        dtype=float,
+    )
+
+    second_array = np.asarray(
+        second,
+        dtype=float,
+    )
+
+    for label, array in (
+        ("first", first_array),
+        ("second", second_array),
+    ):
+        if (
+            array.ndim != 2
+            or array.shape[0] == 0
+            or array.shape[1] != 3
+        ):
+            raise ValueError(
+                f"{label} pocket coordinates must be "
+                "a non-empty N x 3 array"
+            )
+
+    differences = (
+        first_array[:, np.newaxis, :]
+        - second_array[np.newaxis, :, :]
+    )
+
+    distances = np.linalg.norm(
+        differences,
+        axis=2,
+    )
+
+    return float(distances.min())
+
+
+def _box_from_pocket_file(
+    pocket_file: Path,
+    *,
+    padding: float,
+    minimum_size: float = 20.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    coordinates = _read_pdb_coordinates(
+        pocket_file
+    )
+
+    return _box_from_coordinates(
+        coordinates,
+        padding=padding,
+        minimum_size=minimum_size,
+    )
+
+
+
+
+def _merge_nearby_fpocket_definitions(
+    *,
+    selected_pockets: list[dict[str, Any]],
+    independent_definitions: list[PocketDefinition],
+    out_dir: Path,
+    padding: float,
+    distance_threshold: float,
+    starting_rank: int,
+) -> list[PocketDefinition]:
+    if distance_threshold <= 0:
+        raise ValueError(
+            "fpocket merge distance must be greater than zero"
+        )
+
+    if len(selected_pockets) != len(
+        independent_definitions
+    ):
+        raise ValueError(
+            "Selected fpocket records and definitions "
+            "must align"
+        )
+
+    entries: list[
+        tuple[
+            int,
+            int,
+            dict[str, Any],
+            PocketDefinition,
+            np.ndarray,
+        ]
+    ] = []
+
+    for rank, (
+        selected,
+        definition,
+    ) in enumerate(
+        zip(
+            selected_pockets,
+            independent_definitions,
+        ),
+        start=1,
+    ):
+        pocket_number = int(
+            selected["number"]
+        )
+
+        pocket_file = (
+            _coordinate_file_for_pocket(
+                out_dir,
+                pocket_number,
+            )
+        )
+
+        entries.append(
+            (
+                rank,
+                pocket_number,
+                selected,
+                definition,
+                _read_pdb_coordinates(
+                    pocket_file
+                ),
+            )
+        )
+
+    merged: list[PocketDefinition] = []
+
+    for left, right in combinations(
+        entries,
+        2,
+    ):
+        (
+            left_rank,
+            left_number,
+            left_record,
+            left_definition,
+            left_coordinates,
+        ) = left
+
+        (
+            right_rank,
+            right_number,
+            right_record,
+            right_definition,
+            right_coordinates,
+        ) = right
+
+        minimum_distance = (
+            _minimum_coordinate_distance(
+                left_coordinates,
+                right_coordinates,
+            )
+        )
+
+        if minimum_distance > distance_threshold:
+            continue
+
+        combined_coordinates = np.concatenate(
+            (
+                left_coordinates,
+                right_coordinates,
+            ),
+            axis=0,
+        )
+
+        center, size = _box_from_coordinates(
+            combined_coordinates,
+            padding=padding,
+        )
+
+        merged_rank = (
+            starting_rank + len(merged)
+        )
+
+        left_score = _pocket_score(
+            left_record
+        )
+
+        right_score = _pocket_score(
+            right_record
+        )
+
+        pocket_id = sanitize_name(
+            (
+                "fpocket_merge_"
+                f"{left_rank:02d}_{right_rank:02d}_"
+                f"pockets_{left_number}_{right_number}"
+            )
+        )
+
+        merged.append(
+            PocketDefinition(
+                mode="explicit",
+                center_x=float(center[0]),
+                center_y=float(center[1]),
+                center_z=float(center[2]),
+                size_x=float(size[0]),
+                size_y=float(size[1]),
+                size_z=float(size[2]),
+                source=(
+                    "merged nearby fpocket fragments; "
+                    f"ranks {left_rank},{right_rank}; "
+                    f"pockets {left_number},{right_number}; "
+                    "component scores="
+                    f"{left_score:.4f},{right_score:.4f}; "
+                    "minimum vertex distance="
+                    f"{minimum_distance:.3f} A; "
+                    f"threshold={distance_threshold:.3f} A"
+                ),
+                pocket_id=pocket_id,
+                pocket_rank=merged_rank,
+                fpocket_score=None,
+                merged_from=(
+                    left_definition.pocket_id,
+                    right_definition.pocket_id,
+                ),
+                merge_distance=minimum_distance,
+            )
+        )
+
+    return merged
 
 
 def pocket_definition_to_dict(
@@ -134,6 +378,12 @@ def pocket_definition_to_dict(
         "size_x": pocket.size_x,
         "size_y": pocket.size_y,
         "size_z": pocket.size_z,
+        "merged_from": list(
+            pocket.merged_from
+        ),
+        "merge_distance": (
+            pocket.merge_distance
+        ),
         "autobox_ligand": (
             str(pocket.autobox_ligand)
             if pocket.autobox_ligand is not None
@@ -148,10 +398,24 @@ def write_pocket_definitions(
 ) -> Path:
     pocket_list = list(pockets)
 
+    merged_pocket_count = sum(
+        bool(pocket.merged_from)
+        for pocket in pocket_list
+    )
+
     payload = {
         "pocket_count": len(pocket_list),
+        "independent_pocket_count": (
+            len(pocket_list)
+            - merged_pocket_count
+        ),
+        "merged_pocket_count": (
+            merged_pocket_count
+        ),
         "ranking_method": (
-            "fpocket score descending when fpocket is used"
+            "fpocket score descending for independent "
+            "pockets; optional nearby pairwise merged "
+            "candidates appended after independent pockets"
         ),
         "reference_ligand_used_for_selection": False,
         "box_geometry": {
@@ -195,9 +459,18 @@ def detect_fpocket_boxes(
     pocket_number: int | None = None,
     top_n: int = 1,
     fpocket_bin: str = "fpocket",
+    merge_nearby: bool = False,
+    merge_distance: float = 4.0,
 ) -> list[PocketDefinition]:
     if top_n < 1:
-        raise ValueError("fpocket top_n must be at least 1")
+        raise ValueError(
+            "fpocket top_n must be at least 1"
+        )
+
+    if merge_nearby and merge_distance <= 0:
+        raise ValueError(
+            "fpocket merge distance must be greater than zero"
+        )
 
     work_dir.mkdir(parents=True, exist_ok=True)
     fpocket = resolve_executable(fpocket_bin, "fpocket")
@@ -249,6 +522,30 @@ def detect_fpocket_boxes(
             )
         )
 
+    if (
+        merge_nearby
+        and pocket_number is None
+        and len(definitions) > 1
+    ):
+        definitions.extend(
+            _merge_nearby_fpocket_definitions(
+                selected_pockets=(
+                    selected_pockets
+                ),
+                independent_definitions=(
+                    definitions
+                ),
+                out_dir=out_dir,
+                padding=padding,
+                distance_threshold=(
+                    merge_distance
+                ),
+                starting_rank=(
+                    len(definitions) + 1
+                ),
+            )
+        )
+
     return definitions
 
 
@@ -287,6 +584,8 @@ def build_pocket_definitions(
     fpocket_pocket: int | None,
     fpocket_top_n: int,
     fpocket_bin: str,
+    fpocket_merge_nearby: bool = False,
+    fpocket_merge_distance: float = 4.0,
 ) -> list[PocketDefinition]:
     explicit_count = sum(value is not None for value in explicit_values)
 
@@ -332,6 +631,12 @@ def build_pocket_definitions(
         pocket_number=fpocket_pocket,
         top_n=fpocket_top_n,
         fpocket_bin=fpocket_bin,
+        merge_nearby=(
+            fpocket_merge_nearby
+        ),
+        merge_distance=(
+            fpocket_merge_distance
+        ),
     )
 
 
