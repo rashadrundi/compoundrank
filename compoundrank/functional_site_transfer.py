@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .pocket_evidence import (
     SCHEMA_VERSION as POCKET_EVIDENCE_SCHEMA,
@@ -488,6 +489,10 @@ def write_homolog_pocket_evidence(
     receptor_pdb: Path,
     reference_chain_id: str | None = None,
     receptor_chain_id: str | None = None,
+    minimum_mapping_fraction: float = 0.50,
+    minimum_mapped_residues: int = 2,
+    minimum_structure_identity: float = 0.90,
+    minimum_structure_coverage: float = 0.80,
 ) -> dict[str, Any]:
     output = (
         build_homolog_pocket_evidence(
@@ -507,6 +512,18 @@ def write_homolog_pocket_evidence(
             ),
             receptor_chain_id=(
                 receptor_chain_id
+            ),
+            minimum_mapping_fraction=(
+                minimum_mapping_fraction
+            ),
+            minimum_mapped_residues=(
+                minimum_mapped_residues
+            ),
+            minimum_structure_identity=(
+                minimum_structure_identity
+            ),
+            minimum_structure_coverage=(
+                minimum_structure_coverage
             ),
         )
     )
@@ -529,3 +546,324 @@ def write_homolog_pocket_evidence(
     )
 
     return output
+
+
+def read_single_fasta(
+    path: Path,
+) -> dict[str, str]:
+    fasta_path = Path(path)
+
+    if not fasta_path.is_file():
+        raise FileNotFoundError(
+            fasta_path
+        )
+
+    records: list[
+        dict[str, str]
+    ] = []
+
+    header: str | None = None
+    sequence_parts: list[str] = []
+
+    for raw_line in fasta_path.read_text(
+        encoding="utf-8",
+        errors="replace",
+    ).splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        if line.startswith(">"):
+            if header is not None:
+                records.append(
+                    {
+                        "header": header,
+                        "sequence": "".join(
+                            sequence_parts
+                        ),
+                    }
+                )
+
+            header = line[1:].strip()
+            sequence_parts = []
+            continue
+
+        if header is None:
+            raise ValueError(
+                "FASTA sequence appeared before "
+                f"a header in {fasta_path}."
+            )
+
+        sequence_parts.append(line)
+
+    if header is not None:
+        records.append(
+            {
+                "header": header,
+                "sequence": "".join(
+                    sequence_parts
+                ),
+            }
+        )
+
+    if len(records) != 1:
+        raise ValueError(
+            "Functional-site transfer requires "
+            "exactly one FASTA record; "
+            f"{fasta_path} contains "
+            f"{len(records)} records."
+        )
+
+    record = records[0]
+
+    if not record["sequence"]:
+        raise ValueError(
+            f"FASTA record is empty: {fasta_path}"
+        )
+
+    return record
+
+
+def build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Transfer functional-site residues "
+            "from a reference protein onto a "
+            "submitted receptor structure and "
+            "write pocket_evidence.v0.1."
+        )
+    )
+
+    parser.add_argument(
+        "--reference-record",
+        type=Path,
+        required=True,
+        help=(
+            "functional_site_reference.v0.1 "
+            "JSON file"
+        ),
+    )
+
+    parser.add_argument(
+        "--reference-fasta",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--submitted-fasta",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--reference-pdb",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--receptor-pdb",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--reference-chain",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--receptor-chain",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--minimum-mapping-fraction",
+        type=float,
+        default=0.50,
+    )
+
+    parser.add_argument(
+        "--minimum-mapped-residues",
+        type=int,
+        default=2,
+    )
+
+    parser.add_argument(
+        "--minimum-structure-identity",
+        type=float,
+        default=0.90,
+    )
+
+    parser.add_argument(
+        "--minimum-structure-coverage",
+        type=float,
+        default=0.80,
+    )
+
+    return parser
+
+
+def main(
+    argv: Sequence[str] | None = None,
+) -> int:
+    parser = build_cli_parser()
+    arguments = parser.parse_args(argv)
+
+    if not (
+        0.0
+        <= arguments.minimum_mapping_fraction
+        <= 1.0
+    ):
+        parser.error(
+            "--minimum-mapping-fraction "
+            "must be between 0 and 1."
+        )
+
+    if arguments.minimum_mapped_residues < 1:
+        parser.error(
+            "--minimum-mapped-residues "
+            "must be at least 1."
+        )
+
+    if not (
+        0.0
+        <= arguments.minimum_structure_identity
+        <= 1.0
+    ):
+        parser.error(
+            "--minimum-structure-identity "
+            "must be between 0 and 1."
+        )
+
+    if not (
+        0.0
+        <= arguments.minimum_structure_coverage
+        <= 1.0
+    ):
+        parser.error(
+            "--minimum-structure-coverage "
+            "must be between 0 and 1."
+        )
+
+    reference_record = (
+        load_functional_site_reference(
+            arguments.reference_record
+        )
+    )
+
+    reference_fasta = read_single_fasta(
+        arguments.reference_fasta
+    )
+
+    submitted_fasta = read_single_fasta(
+        arguments.submitted_fasta
+    )
+
+    evidence = (
+        write_homolog_pocket_evidence(
+            arguments.output,
+            reference_record=(
+                reference_record
+            ),
+            reference_sequence=(
+                reference_fasta[
+                    "sequence"
+                ]
+            ),
+            submitted_sequence=(
+                submitted_fasta[
+                    "sequence"
+                ]
+            ),
+            reference_pdb=(
+                arguments.reference_pdb
+            ),
+            receptor_pdb=(
+                arguments.receptor_pdb
+            ),
+            reference_chain_id=(
+                arguments.reference_chain
+            ),
+            receptor_chain_id=(
+                arguments.receptor_chain
+            ),
+            minimum_mapping_fraction=(
+                arguments.minimum_mapping_fraction
+            ),
+            minimum_mapped_residues=(
+                arguments.minimum_mapped_residues
+            ),
+            minimum_structure_identity=(
+                arguments.minimum_structure_identity
+            ),
+            minimum_structure_coverage=(
+                arguments.minimum_structure_coverage
+            ),
+        )
+    )
+
+    summary = evidence[
+        "transfer_summary"
+    ]
+
+    print(
+        json.dumps(
+            {
+                "output": str(
+                    arguments.output
+                ),
+                "evidence_id": evidence[
+                    "evidence_id"
+                ],
+                "evidence_origin": evidence[
+                    "evidence_origin"
+                ],
+                "selection_mode": evidence[
+                    "selection_mode"
+                ],
+                "confidence": evidence[
+                    "confidence"
+                ],
+                "requested_residue_count": (
+                    summary[
+                        "requested_residue_count"
+                    ]
+                ),
+                "mapped_conserved_count": (
+                    summary[
+                        "mapped_conserved_count"
+                    ]
+                ),
+                "mapping_fraction": (
+                    summary[
+                        "mapping_fraction"
+                    ]
+                ),
+                "residues": evidence[
+                    "residues"
+                ],
+                "selection_checks": (
+                    summary[
+                        "selection_checks"
+                    ]
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
