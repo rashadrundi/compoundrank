@@ -9,6 +9,10 @@ from typing import Iterable
 
 from rdkit import Chem
 
+from .aligned_receptor_ensemble import (
+    record_aligned_receptor_ensemble_input,
+    validate_receptor_ensemble_options,
+)
 from .clustering import cluster_pose_hypotheses
 from .compound_retrieval import run_compound_retrieval
 from .export import write_complex_pdb
@@ -49,6 +53,10 @@ from .pose_recovery import (
 )
 from .ramachandran import run_ramachandran_validation
 from .receptor import prepare_receptor
+from .receptor_conformer_preparation import (
+    prepare_receptor_conformers,
+    write_receptor_conformer_preparation,
+)
 from .reference_evidence_workflow import (
     run_reference_evidence_workflow,
 )
@@ -846,6 +854,7 @@ def run_pipeline(
     reference_ligand: Path | None = None,
     pose_recovery_rmsd_threshold: float = 2.0,
     receptor_ensemble_json: Path | None = None,
+    aligned_receptor_ensemble_json: Path | None = None,
 ) -> list[Path]:
     cache_root = data_root / "cache"
     work_root = data_root / "work"
@@ -888,6 +897,11 @@ def run_pipeline(
             if stale_path.exists():
                 stale_path.unlink()
 
+    validate_receptor_ensemble_options(
+        receptor_ensemble_json,
+        aligned_receptor_ensemble_json,
+    )
+
     _run_structure_validation(
         structure_path=Path(
             receptor_pdb
@@ -924,6 +938,38 @@ def run_pipeline(
             "[RECEPTOR ENSEMBLE] Docking "
             "continues to use the submitted "
             "receptor in this integration stage."
+        )
+
+    aligned_receptor_ensemble = None
+
+    if aligned_receptor_ensemble_json is not None:
+        (
+            aligned_receptor_ensemble,
+            aligned_ensemble_audit_path,
+        ) = record_aligned_receptor_ensemble_input(
+            manifest_path=Path(
+                aligned_receptor_ensemble_json
+            ),
+            submitted_receptor_pdb=Path(
+                receptor_pdb
+            ),
+            output_dir=(
+                output_dir
+                / "aligned_receptor_ensemble_input"
+            ),
+            verify_checksums=True,
+            overwrite=overwrite,
+        )
+
+        print(
+            "[ALIGNED RECEPTOR ENSEMBLE] "
+            "Validated input: "
+            f"{aligned_ensemble_audit_path}"
+        )
+        print(
+            "[ALIGNED RECEPTOR ENSEMBLE] "
+            "Snapshots accepted: "
+            f"{aligned_receptor_ensemble['snapshot_count']}"
         )
 
     effective_pocket_evidence_json = (
@@ -1164,13 +1210,65 @@ def run_pipeline(
     print(f"[PATHS] Final results: {output_dir}")
 
     try:
-        receptor = prepare_receptor(
-            receptor_pdb,
-            cache_root,
-            ph=ph,
-            pdb2pqr_bin=pdb2pqr_bin,
-            meeko_receptor_bin=meeko_receptor_bin,
-        )
+        if aligned_receptor_ensemble is not None:
+            receptor_conformers = (
+                prepare_receptor_conformers(
+                    submitted_receptor_pdb=Path(
+                        receptor_pdb
+                    ),
+                    aligned_ensemble=(
+                        aligned_receptor_ensemble
+                    ),
+                    cache_root=cache_root,
+                    ph=ph,
+                    pdb2pqr_bin=pdb2pqr_bin,
+                    meeko_receptor_bin=(
+                        meeko_receptor_bin
+                    ),
+                    prepare_receptor_fn=(
+                        prepare_receptor
+                    ),
+                )
+            )
+
+            receptor = (
+                receptor_conformers[0][1]
+            )
+
+            preparation_audit_path = (
+                write_receptor_conformer_preparation(
+                    output_dir
+                    / (
+                        "receptor_conformer_"
+                        "preparation.json"
+                    ),
+                    receptor_conformers,
+                    aligned_ensemble=(
+                        aligned_receptor_ensemble
+                    ),
+                )
+            )
+
+            print(
+                "[RECEPTOR PREPARATION] "
+                f"Prepared "
+                f"{len(receptor_conformers)} "
+                "conformers"
+            )
+            print(
+                "[RECEPTOR PREPARATION] "
+                f"Audit: {preparation_audit_path}"
+            )
+        else:
+            receptor = prepare_receptor(
+                receptor_pdb,
+                cache_root,
+                ph=ph,
+                pdb2pqr_bin=pdb2pqr_bin,
+                meeko_receptor_bin=(
+                    meeko_receptor_bin
+                ),
+            )
 
         # Detect geometric pockets on the original protein coordinates.
         # The protonated display structure is retained for validation/output,

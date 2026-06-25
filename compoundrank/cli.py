@@ -12,6 +12,9 @@ from .paths import (
     require_absolute_external_file,
     sanitize_name,
 )
+from .aligned_receptor_ensemble import (
+    validate_receptor_ensemble_options,
+)
 from .homolog_search import DEFAULT_API_URL
 from .pipeline import run_pipeline
 
@@ -34,6 +37,18 @@ def build_parser() -> argparse.ArgumentParser:
             "integration validates and "
             "records the ensemble but does "
             "not change docking behavior."
+        ),
+    )
+    parser.add_argument(
+        "--aligned-receptor-ensemble-json",
+        default=None,
+        help=(
+            "Optional absolute path to an "
+            "aligned_receptor_ensemble.v0.1 "
+            "manifest. Accepted conformers are "
+            "validated and receptor-prepared; "
+            "GNINA remains submitted-receptor "
+            "only in this preparation stage."
         ),
     )
     parser.add_argument("--data-root", required=True, help="Absolute external data root")
@@ -333,6 +348,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.receptor_ensemble_json
         else None
     )
+    aligned_receptor_ensemble_json = (
+        require_absolute_external_file(
+            args.aligned_receptor_ensemble_json,
+            "Aligned receptor ensemble manifest",
+        )
+        if args.aligned_receptor_ensemble_json
+        else None
+    )
+
+    validate_receptor_ensemble_options(
+        receptor_ensemble_json,
+        aligned_receptor_ensemble_json,
+    )
     if receptor.suffix.lower() != ".pdb":
         raise ValueError("--receptor must be a PDB file")
     data_root = require_absolute_external_dir(args.data_root, "Data root", create=True)
@@ -522,6 +550,9 @@ def main(argv: list[str] | None = None) -> int:
         receptor_pdb=receptor,
         receptor_ensemble_json=(
             receptor_ensemble_json
+        ),
+        aligned_receptor_ensemble_json=(
+            aligned_receptor_ensemble_json
         ),
         ligand_requests=requests,
         data_root=data_root,
