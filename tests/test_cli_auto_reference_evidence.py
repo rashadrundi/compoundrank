@@ -276,6 +276,39 @@ class CliAutoReferenceEvidenceTests(
                 ]
             )
 
+    def test_parser_accepts_sequence_search_configuration(
+        self,
+    ) -> None:
+        arguments = (
+            build_parser().parse_args(
+                [
+                    "--receptor",
+                    "receptor.pdb",
+                    "--data-root",
+                    "data",
+                    "--ligand-smiles",
+                    "C",
+                    "--fasta",
+                    "protein.faa",
+                    "--auto-reference-evidence",
+                    "--reference-sequence-search-email",
+                    "test@example.org",
+                    "--reference-sequence-search-timeout-seconds",
+                    "321",
+                ]
+            )
+        )
+
+        self.assertEqual(
+            arguments.reference_sequence_search_email,
+            "test@example.org",
+        )
+
+        self.assertEqual(
+            arguments.reference_sequence_search_timeout_seconds,
+            321.0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

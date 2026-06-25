@@ -486,6 +486,12 @@ def _resolve_pocket_evidence_json(
     fasta_path: Path | None,
     receptor_pdb: Path,
     output_dir: Path,
+    reference_sequence_search_email: (
+        str | None
+    ) = None,
+    reference_sequence_search_timeout_seconds: (
+        float
+    ) = 600.0,
 ) -> Path | None:
     if not auto_reference_evidence:
         return (
@@ -527,6 +533,15 @@ def _resolve_pocket_evidence_json(
             "greater than zero."
         )
 
+    if (
+        reference_sequence_search_timeout_seconds
+        <= 0
+    ):
+        raise ValueError(
+            "Reference sequence-search timeout "
+            "must be greater than zero."
+        )
+
     workflow_output = (
         output_dir
         / "automatic_reference_evidence"
@@ -560,7 +575,13 @@ def _resolve_pocket_evidence_json(
         if reference_uniprot_accession is None:
             accession_resolution = (
                 resolve_uniprot_accession_from_fasta(
-                    Path(fasta_path)
+                    Path(fasta_path),
+                    sequence_search_email=(
+                        reference_sequence_search_email
+                    ),
+                    sequence_search_timeout_seconds=(
+                        reference_sequence_search_timeout_seconds
+                    ),
                 )
             )
 
@@ -711,6 +732,12 @@ def run_pipeline(
     receptor_chain_id: str | None = None,
     reference_pdb: Path | None = None,
     reference_evidence_timeout_seconds: float = 60.0,
+    reference_sequence_search_email: (
+        str | None
+    ) = None,
+    reference_sequence_search_timeout_seconds: (
+        float
+    ) = 600.0,
     gnina_timeout_seconds: int | None = 3600,
     fasta_path: Path | None = None,
     homolog_api_url: str = DEFAULT_API_URL,
@@ -796,6 +823,12 @@ def run_pipeline(
             fasta_path=fasta_path,
             receptor_pdb=receptor_pdb,
             output_dir=output_dir,
+            reference_sequence_search_email=(
+                reference_sequence_search_email
+            ),
+            reference_sequence_search_timeout_seconds=(
+                reference_sequence_search_timeout_seconds
+            ),
         )
     )
 

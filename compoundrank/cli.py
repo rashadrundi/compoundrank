@@ -269,6 +269,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-validity", action="store_true")
     parser.add_argument("--keep-workdir", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--reference-sequence-search-email",
+        default=None,
+        help=(
+            "Contact email required by EMBL-EBI "
+            "when sequence-based UniProt discovery "
+            "is needed because the FASTA contains "
+            "no accession."
+        ),
+    )
+    parser.add_argument(
+        "--reference-sequence-search-timeout-seconds",
+        type=float,
+        default=600.0,
+        help=(
+            "Maximum total seconds allowed for the "
+            "remote UniProtKB sequence search."
+        ),
+    )
+
     return parser
 
 
@@ -540,6 +560,12 @@ def main(argv: list[str] | None = None) -> int:
         reference_pdb=reference_pdb,
         reference_evidence_timeout_seconds=(
             args.reference_evidence_timeout_seconds
+        ),
+        reference_sequence_search_email=(
+            args.reference_sequence_search_email
+        ),
+        reference_sequence_search_timeout_seconds=(
+            args.reference_sequence_search_timeout_seconds
         ),
         max_hypotheses=args.max_hypotheses,
         cluster_threshold=args.cluster_threshold,

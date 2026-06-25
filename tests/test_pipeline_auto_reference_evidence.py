@@ -246,7 +246,11 @@ class PipelineAutoReferenceEvidenceTests(
             )
 
             resolver.assert_called_once_with(
-                fasta
+                fasta,
+                sequence_search_email=None,
+                sequence_search_timeout_seconds=(
+                    600.0
+                ),
             )
 
             fetcher.assert_called_once_with(
