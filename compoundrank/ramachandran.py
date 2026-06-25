@@ -1606,6 +1606,132 @@ def write_ramachandran_outputs(
     }
 
 
+def run_ramachandran_validation(
+    structure_path: Path,
+    output_dir: Path,
+    *,
+    model_index: int = 0,
+    chain_id: str | None = None,
+    continue_on_error: bool = False,
+) -> dict[str, Any]:
+    destination = Path(
+        output_dir
+    )
+
+    destination.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    json_path = (
+        destination
+        / "ramachandran_validation.json"
+    )
+
+    csv_path = (
+        destination
+        / "ramachandran_residues.csv"
+    )
+
+    # Prevent stale success artifacts from surviving
+    # a later failed validation run.
+    for stale_path in (
+        json_path,
+        csv_path,
+    ):
+        if stale_path.exists():
+            stale_path.unlink()
+
+    try:
+        report = validate_ramachandran(
+            structure_path,
+            model_index=model_index,
+            chain_id=chain_id,
+        )
+
+        outputs = (
+            write_ramachandran_outputs(
+                report,
+                destination,
+            )
+        )
+
+    except Exception as error:
+        if not continue_on_error:
+            raise
+
+        report = {
+            "schema_version": (
+                SCHEMA_VERSION
+            ),
+            "status": "failed",
+            "selection_mode": (
+                "report_only"
+            ),
+            "classification_method": (
+                CLASSIFICATION_METHOD
+            ),
+            "source_structure": str(
+                Path(
+                    structure_path
+                ).resolve()
+            ),
+            "requested_chain": (
+                chain_id
+            ),
+            "evaluable_residues": 0,
+            "skipped_residues": 0,
+            "summary": {
+                "favored": 0,
+                "allowed": 0,
+                "outliers": 0,
+                "favored_fraction": 0.0,
+                "allowed_fraction": 0.0,
+                "outlier_fraction": 0.0,
+                "screening_flag": (
+                    "validation_failed"
+                ),
+            },
+            "error": {
+                "type": (
+                    type(error).__name__
+                ),
+                "message": str(
+                    error
+                ),
+            },
+            "limitations": [
+                (
+                    "Ramachandran validation "
+                    "failed, but this stage is "
+                    "report-only and did not "
+                    "block downstream work."
+                ),
+            ],
+        }
+
+        json_path.write_text(
+            json.dumps(
+                report,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        outputs = {
+            "json": str(
+                json_path
+            ),
+        }
+
+    return {
+        "report": report,
+        "outputs": outputs,
+    }
+
+
 def build_cli_parser() -> (
     argparse.ArgumentParser
 ):

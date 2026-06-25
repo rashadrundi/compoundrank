@@ -1422,6 +1422,250 @@ def _render_pose_recovery_section(
 
     return lines
 
+def _render_structure_validation_section(
+    output_dir: Path,
+) -> list[str]:
+    candidates = (
+        (
+            "Submitted receptor",
+            (
+                output_dir
+                / "structure_validation"
+                / "receptor"
+                / "ramachandran_validation.json"
+            ),
+        ),
+        (
+            "Automatic reference structure",
+            (
+                output_dir
+                / "automatic_reference_evidence"
+                / "structure_validation"
+                / "reference"
+                / "ramachandran_validation.json"
+            ),
+        ),
+        (
+            "Reference structure",
+            (
+                output_dir
+                / "structure_validation"
+                / "reference"
+                / "ramachandran_validation.json"
+            ),
+        ),
+    )
+
+    reports: list[
+        tuple[
+            str,
+            Path,
+            dict[str, Any],
+        ]
+    ] = []
+
+    observed_paths: set[Path] = set()
+
+    for label, path in candidates:
+        resolved = path.resolve()
+
+        if resolved in observed_paths:
+            continue
+
+        observed_paths.add(
+            resolved
+        )
+
+        report = _load_json(
+            path
+        )
+
+        if report is not None:
+            reports.append(
+                (
+                    label,
+                    path,
+                    report,
+                )
+            )
+
+    if not reports:
+        return []
+
+    lines = [
+        "## Structure Geometry Validation",
+        "",
+        (
+            "Ramachandran validation is "
+            "reported for structural review "
+            "and does not currently reject "
+            "or rerank structures."
+        ),
+        "",
+        (
+            "| Structure | Status | Chain | "
+            "Evaluable | Favored | Allowed | "
+            "Outliers | Screening flag |"
+        ),
+        (
+            "|---|---|---|---:|---:|---:|"
+            "---:|---|"
+        ),
+    ]
+
+    artifact_lines: list[str] = []
+    warnings: list[str] = []
+
+    def fraction_text(
+        value: Any,
+    ) -> str:
+        try:
+            return f"{float(value):.2%}"
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return "unknown"
+
+    for label, path, report in reports:
+        summary = report.get(
+            "summary",
+            {},
+        )
+
+        if not isinstance(
+            summary,
+            dict,
+        ):
+            summary = {}
+
+        status = str(
+            report.get(
+                "status",
+                "unknown",
+            )
+        )
+
+        flag = str(
+            summary.get(
+                "screening_flag",
+                "unknown",
+            )
+        )
+
+        favored_text = (
+            f"{_format_value(summary.get('favored'))} "
+            f"({fraction_text(summary.get('favored_fraction'))})"
+        )
+
+        allowed_text = (
+            f"{_format_value(summary.get('allowed'))} "
+            f"({fraction_text(summary.get('allowed_fraction'))})"
+        )
+
+        outlier_text = (
+            f"{_format_value(summary.get('outliers'))} "
+            f"({fraction_text(summary.get('outlier_fraction'))})"
+        )
+
+        lines.append(
+            "| "
+            f"{label} | "
+            f"{status} | "
+            f"{_format_value(report.get('requested_chain'))} | "
+            f"{_format_value(report.get('evaluable_residues'))} | "
+            f"{favored_text} | "
+            f"{allowed_text} | "
+            f"{outlier_text} | "
+            f"{flag} |"
+        )
+
+        artifact_lines.append(
+            f"- {label} validation file: "
+            f"`{_relative_or_original(output_dir, path)}`"
+        )
+
+        csv_path = (
+            path.parent
+            / "ramachandran_residues.csv"
+        )
+
+        if csv_path.is_file():
+            artifact_lines.append(
+                f"- {label} residue table: "
+                f"`{_relative_or_original(output_dir, csv_path)}`"
+            )
+
+        if status == "failed":
+            error = report.get(
+                "error",
+                {},
+            )
+
+            message = (
+                error.get("message")
+                if isinstance(
+                    error,
+                    dict,
+                )
+                else error
+            )
+
+            warnings.append(
+                f"{label}: Ramachandran "
+                "validation failed: "
+                f"{_format_value(message)}"
+            )
+
+        elif flag not in {
+            "meets_ramalyze_goals",
+            "unknown",
+        }:
+            warnings.append(
+                f"{label}: structure geometry "
+                f"was flagged as `{flag}`. "
+                "Review residue-level outliers "
+                "before relying on this model."
+            )
+
+    lines.append("")
+
+    if artifact_lines:
+        lines += [
+            "### Validation Artifacts",
+            "",
+            *artifact_lines,
+            "",
+        ]
+
+    if warnings:
+        lines += [
+            "### Geometry Review Notes",
+            "",
+        ]
+
+        for warning in warnings:
+            lines.append(
+                f"- {warning}"
+            )
+
+        lines.append("")
+
+    lines += [
+        (
+            "_Ramachandran results describe "
+            "backbone conformational geometry "
+            "only. They do not replace clash, "
+            "rotamer, bond-length, bond-angle, "
+            "electron-density, or dynamics "
+            "validation._"
+        ),
+        "",
+    ]
+
+    return lines
+
+
 def render_run_report(
     *,
     output_dir: Path,
@@ -1436,6 +1680,11 @@ def render_run_report(
     ]
 
     lines.extend(_render_target_section(target_evidence))
+    lines.extend(
+        _render_structure_validation_section(
+            output_dir
+        )
+    )
     lines.extend(_render_ligand_retrieval_section(output_dir))
     lines.extend(_render_docking_section(hypotheses))
     lines.extend(_render_pocket_selection_section(output_dir))

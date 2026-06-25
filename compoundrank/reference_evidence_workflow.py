@@ -17,6 +17,8 @@ from compoundrank.uniprot_acquisition import (
 )
 
 
+from .ramachandran import run_ramachandran_validation
+
 WORKFLOW_SCHEMA_VERSION = (
     "reference_evidence_workflow.v0.1"
 )
@@ -487,6 +489,55 @@ def run_reference_evidence_workflow(
             ),
         }
 
+    reference_validation = (
+        run_ramachandran_validation(
+            reference_pdb_path,
+            (
+                output
+                / "structure_validation"
+                / "reference"
+            ),
+            chain_id=selected_chain,
+            continue_on_error=True,
+        )
+    )
+
+    reference_validation_report = (
+        reference_validation[
+            "report"
+        ]
+    )
+
+    reference_validation_outputs = (
+        reference_validation[
+            "outputs"
+        ]
+    )
+
+    reference_validation_summary = (
+        reference_validation_report.get(
+            "summary",
+            {},
+        )
+    )
+
+    if not isinstance(
+        reference_validation_summary,
+        dict,
+    ):
+        reference_validation_summary = {}
+
+    print(
+        "[RAMACHANDRAN] "
+        "reference structure: "
+        f"status="
+        f"{reference_validation_report.get('status')}; "
+        f"evaluable="
+        f"{reference_validation_report.get('evaluable_residues')}; "
+        f"flag="
+        f"{reference_validation_summary.get('screening_flag')}"
+    )
+
     receptor_path = Path(
         receptor_pdb
     )
@@ -577,6 +628,32 @@ def run_reference_evidence_workflow(
             ),
             "download": (
                 download_metadata
+            ),
+        },
+        "reference_structure_validation": {
+            "status": (
+                reference_validation_report.get(
+                    "status"
+                )
+            ),
+            "selection_mode": (
+                reference_validation_report.get(
+                    "selection_mode"
+                )
+            ),
+            "chain": selected_chain,
+            "evaluable_residues": (
+                reference_validation_report.get(
+                    "evaluable_residues"
+                )
+            ),
+            "summary": (
+                reference_validation_report.get(
+                    "summary"
+                )
+            ),
+            "outputs": (
+                reference_validation_outputs
             ),
         },
         "acquisition_outputs": (

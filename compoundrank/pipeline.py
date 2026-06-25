@@ -41,6 +41,7 @@ from .pose_recovery import (
     evaluate_scored_pose_sdf,
     write_scored_pose_outputs,
 )
+from .ramachandran import run_ramachandran_validation
 from .receptor import prepare_receptor
 from .reference_evidence_workflow import (
     run_reference_evidence_workflow,
@@ -686,6 +687,95 @@ def _resolve_pocket_evidence_json(
     return evidence_path
 
 
+def _run_structure_validation(
+    *,
+    structure_path: Path,
+    output_dir: Path,
+    chain_id: str | None,
+    label: str,
+) -> dict[str, object]:
+    result = run_ramachandran_validation(
+        structure_path,
+        output_dir,
+        chain_id=chain_id,
+        continue_on_error=True,
+    )
+
+    report = result.get(
+        "report",
+        {},
+    )
+
+    if not isinstance(
+        report,
+        dict,
+    ):
+        raise TypeError(
+            "Ramachandran validation "
+            "returned an invalid report."
+        )
+
+    summary = report.get(
+        "summary",
+        {},
+    )
+
+    if not isinstance(
+        summary,
+        dict,
+    ):
+        summary = {}
+
+    favored_fraction = float(
+        summary.get(
+            "favored_fraction",
+            0.0,
+        )
+        or 0.0
+    )
+
+    outlier_fraction = float(
+        summary.get(
+            "outlier_fraction",
+            0.0,
+        )
+        or 0.0
+    )
+
+    print(
+        "[RAMACHANDRAN] "
+        f"{label}: "
+        f"status={report.get('status')}; "
+        f"evaluable="
+        f"{report.get('evaluable_residues')}; "
+        f"favored={favored_fraction:.2%}; "
+        f"outliers={outlier_fraction:.2%}; "
+        f"flag="
+        f"{summary.get('screening_flag')}"
+    )
+
+    outputs = result.get(
+        "outputs",
+        {},
+    )
+
+    if isinstance(
+        outputs,
+        dict,
+    ):
+        report_path = outputs.get(
+            "json"
+        )
+
+        if report_path:
+            print(
+                "[RAMACHANDRAN] "
+                f"Report: {report_path}"
+            )
+
+    return result
+
+
 def run_pipeline(
     *,
     receptor_pdb: Path,
@@ -790,6 +880,19 @@ def run_pipeline(
 
             if stale_path.exists():
                 stale_path.unlink()
+
+    _run_structure_validation(
+        structure_path=Path(
+            receptor_pdb
+        ),
+        output_dir=(
+            output_dir
+            / "structure_validation"
+            / "receptor"
+        ),
+        chain_id=receptor_chain_id,
+        label="submitted receptor",
+    )
 
     effective_pocket_evidence_json = (
         _resolve_pocket_evidence_json(
