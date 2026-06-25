@@ -21,3 +21,6 @@ compoundrank = "compoundrank.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["compoundrank*"]
+
+[tool.setuptools.package-data]
+compoundrank = ["data/ramachandran/*"]
