@@ -23,6 +23,9 @@ from .ligand import (
     read_manifest,
 )
 from .models import LigandResult, PoseRecord
+from .receptor_ensemble import (
+    record_receptor_ensemble_input,
+)
 from .pocket import (
     build_pocket_definitions,
     write_pocket_definitions,
@@ -839,6 +842,7 @@ def run_pipeline(
     auto_retrieve_pubchem_timeout_seconds: int = 60,
     reference_ligand: Path | None = None,
     pose_recovery_rmsd_threshold: float = 2.0,
+    receptor_ensemble_json: Path | None = None,
 ) -> list[Path]:
     cache_root = data_root / "cache"
     work_root = data_root / "work"
@@ -893,6 +897,31 @@ def run_pipeline(
         chain_id=receptor_chain_id,
         label="submitted receptor",
     )
+
+    if receptor_ensemble_json is not None:
+        ensemble_audit_path = (
+            record_receptor_ensemble_input(
+                manifest_path=Path(
+                    receptor_ensemble_json
+                ),
+                output_dir=(
+                    output_dir
+                    / "structure_ensemble_input"
+                ),
+                verify_checksums=True,
+                overwrite=overwrite,
+            )
+        )
+        print(
+            "[RECEPTOR ENSEMBLE] "
+            "Validated report-only ensemble: "
+            f"{ensemble_audit_path}"
+        )
+        print(
+            "[RECEPTOR ENSEMBLE] Docking "
+            "continues to use the submitted "
+            "receptor in this integration stage."
+        )
 
     effective_pocket_evidence_json = (
         _resolve_pocket_evidence_json(

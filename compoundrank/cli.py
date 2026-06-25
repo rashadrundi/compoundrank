@@ -24,6 +24,18 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--receptor", required=True, help="Absolute receptor PDB path")
+    parser.add_argument(
+        "--receptor-ensemble-json",
+        default=None,
+        help=(
+            "Optional absolute path to a "
+            "structure_ensemble.v0.1 "
+            "manifest. The current "
+            "integration validates and "
+            "records the ensemble but does "
+            "not change docking behavior."
+        ),
+    )
     parser.add_argument("--data-root", required=True, help="Absolute external data root")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--run-name", default=None)
@@ -313,6 +325,14 @@ def load_box_json(path):
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     receptor = require_absolute_external_file(args.receptor, "Receptor PDB")
+    receptor_ensemble_json = (
+        require_absolute_external_file(
+            args.receptor_ensemble_json,
+            "Receptor ensemble manifest",
+        )
+        if args.receptor_ensemble_json
+        else None
+    )
     if receptor.suffix.lower() != ".pdb":
         raise ValueError("--receptor must be a PDB file")
     data_root = require_absolute_external_dir(args.data_root, "Data root", create=True)
@@ -500,6 +520,9 @@ def main(argv: list[str] | None = None) -> int:
 
     run_pipeline(
         receptor_pdb=receptor,
+        receptor_ensemble_json=(
+            receptor_ensemble_json
+        ),
         ligand_requests=requests,
         data_root=data_root,
         output_dir=output_dir,
