@@ -22,6 +22,9 @@ from .ligand import (
     prepare_ligand,
     read_manifest,
 )
+from .conformer_context import (
+    receptor_display_pdb_for_pose,
+)
 from .models import LigandResult, PoseRecord
 from .receptor_ensemble import (
     record_receptor_ensemble_input,
@@ -1643,8 +1646,15 @@ def run_pipeline(
             selected_clusters = result.clusters[:max_hypotheses]
 
             for hypothesis_rank, cluster in enumerate(selected_clusters, start=1):
+                representative_receptor_pdb = (
+                    receptor_display_pdb_for_pose(
+                        cluster.representative,
+                        receptor.display_pdb,
+                    )
+                )
+
                 evidence = summarize_interactions(
-                    receptor.display_pdb,
+                    representative_receptor_pdb,
                     cluster.representative.molecule,
                 )
 
@@ -1658,7 +1668,7 @@ def run_pipeline(
 
                 write_complex_pdb(
                     output_path,
-                    receptor.display_pdb,
+                    representative_receptor_pdb,
                     result,
                     cluster,
                     evidence,

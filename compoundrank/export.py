@@ -65,6 +65,10 @@ def write_complex_pdb(
         f"POSE CONFIDENCE {ligand_result.uncertainty.upper()}",
         f"POCKET ID {representative.pocket_id}",
         f"POCKET SOURCE {representative.pocket_source or 'unknown'}",
+        (
+            "RECEPTOR CONFORMER "
+            f"{representative.receptor_conformer_id}"
+        ),
         "PHYSICAL VALIDITY POSEBUSTERS PASS",
     ]
 

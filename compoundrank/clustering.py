@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from .chemistry import direct_heavy_rmsd
+from .conformer_context import (
+    records_share_receptor_conformer,
+)
 from .models import PoseCluster, PoseRecord
 
 
@@ -29,7 +32,17 @@ def cluster_pose_hypotheses(
     for record in ordered:
         assigned_cluster: PoseCluster | None = None
         for cluster in clusters:
-            rmsd = direct_heavy_rmsd(record.molecule, cluster.representative.molecule)
+            if not records_share_receptor_conformer(
+                record,
+                cluster.representative,
+            ):
+                continue
+
+            rmsd = direct_heavy_rmsd(
+                record.molecule,
+                cluster.representative.molecule,
+            )
+
             if rmsd <= rmsd_threshold:
                 assigned_cluster = cluster
                 break
