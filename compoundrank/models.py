@@ -96,6 +96,9 @@ class PoseRecord:
     pocket_rank: int = 1
     pocket_source: str | None = None
     fpocket_score: float | None = None
+    receptor_conformer_id: str = "submitted_receptor"
+    receptor_source_pdb: Path | None = None
+    receptor_display_pdb: Path | None = None
 
 
 @dataclass

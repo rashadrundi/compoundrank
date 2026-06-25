@@ -41,9 +41,36 @@ def run_gnina_seed(
     cpu: int | None = None,
     device: int | None = None,
     timeout_seconds: int | None = None,
+    receptor_conformer_id: str = "submitted_receptor",
 ) -> list[PoseRecord]:
     gnina = resolve_executable(gnina_bin, "GNINA")
-    seed_dir = work_dir / ligand.name / pocket.pocket_id / f"seed_{seed}"
+
+    conformer_id = receptor_conformer_id.strip()
+
+    if not conformer_id:
+        raise ValueError(
+            "receptor_conformer_id cannot be empty"
+        )
+
+    if any(
+        separator in conformer_id
+        for separator in (
+            "/",
+            "\\",
+        )
+    ):
+        raise ValueError(
+            "receptor_conformer_id cannot contain "
+            "path separators"
+        )
+
+    seed_dir = (
+        work_dir
+        / conformer_id
+        / ligand.name
+        / pocket.pocket_id
+        / f"seed_{seed}"
+    )
     seed_dir.mkdir(parents=True, exist_ok=True)
     output_sdf = seed_dir / "poses.sdf"
 
@@ -116,6 +143,10 @@ def run_gnina_seed(
         reconstructed.SetIntProp("seed", seed)
         reconstructed.SetIntProp("pose_number", pose_number)
         reconstructed.SetProp("pocket_id", pocket.pocket_id)
+        reconstructed.SetProp(
+            "receptor_conformer_id",
+            conformer_id,
+        )
 
         records.append(
             PoseRecord(
@@ -131,6 +162,13 @@ def run_gnina_seed(
                 pocket_rank=pocket.pocket_rank,
                 pocket_source=pocket.source or pocket.mode,
                 fpocket_score=pocket.fpocket_score,
+                receptor_conformer_id=conformer_id,
+                receptor_source_pdb=(
+                    receptor.source_pdb
+                ),
+                receptor_display_pdb=(
+                    receptor.display_pdb
+                ),
             )
         )
 
