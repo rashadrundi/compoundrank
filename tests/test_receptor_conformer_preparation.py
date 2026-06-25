@@ -230,7 +230,7 @@ class ReceptorConformerPreparationTests(
                 payload[
                     "docking_behavior"
                 ],
-                "submitted_receptor_only",
+                "all_prepared_conformers",
             )
 
             self.assertEqual(

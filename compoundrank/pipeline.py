@@ -82,19 +82,37 @@ def _top_score(result: LigandResult) -> float:
 def _accepted_records_for_selected_pocket(
     *,
     valid_records_by_pocket: dict[
-        str,
+        tuple[str, str] | str,
         list[PoseRecord],
     ],
     selected_pocket_id: str,
+    selected_receptor_conformer_id: str = (
+        "submitted_receptor"
+    ),
 ) -> list[PoseRecord]:
-    """Return only accepted poses from the selected pocket."""
+    """Return accepted poses for one conformer-pocket pair."""
 
+    pair_key = (
+        selected_receptor_conformer_id,
+        selected_pocket_id,
+    )
+
+    if pair_key in valid_records_by_pocket:
+        return list(
+            valid_records_by_pocket[
+                pair_key
+            ]
+        )
+
+    # Compatibility with legacy single-receptor
+    # callers and existing focused tests.
     return list(
         valid_records_by_pocket.get(
             selected_pocket_id,
             [],
         )
     )
+
 
 
 def _output_name(
@@ -134,8 +152,26 @@ def _preserve_posebusters_artifacts(
     output_dir: Path,
     ligand_name: str,
     pocket_id: str,
+    receptor_conformer_id: str = (
+        "submitted_receptor"
+    ),
 ) -> list[Path]:
-    """Copy PoseBusters audit inputs and reports to final results."""
+    """Copy conformer-specific PoseBusters audit artifacts."""
+
+    conformer_id = (
+        receptor_conformer_id.strip()
+    )
+
+    if (
+        not conformer_id
+        or "/" in conformer_id
+        or "\\" in conformer_id
+    ):
+        raise ValueError(
+            "Invalid receptor conformer ID "
+            f"for audit output: "
+            f"{conformer_id!r}"
+        )
 
     artifact_names = (
         "posebusters_input.sdf",
@@ -146,6 +182,18 @@ def _preserve_posebusters_artifacts(
         output_dir
         / "posebusters_reports"
         / ligand_name
+    )
+
+    # Retain the legacy submitted-receptor path,
+    # while isolating every snapshot's reports.
+    if conformer_id != "submitted_receptor":
+        destination_dir = (
+            destination_dir
+            / conformer_id
+        )
+
+    destination_dir = (
+        destination_dir
         / pocket_id
     )
 
@@ -153,7 +201,8 @@ def _preserve_posebusters_artifacts(
 
     for artifact_name in artifact_names:
         source_path = (
-            validity_dir / artifact_name
+            validity_dir
+            / artifact_name
         )
 
         if not source_path.is_file():
@@ -165,16 +214,20 @@ def _preserve_posebusters_artifacts(
         )
 
         destination_path = (
-            destination_dir / artifact_name
+            destination_dir
+            / artifact_name
         )
 
         destination_path.write_bytes(
             source_path.read_bytes()
         )
 
-        copied_paths.append(destination_path)
+        copied_paths.append(
+            destination_path
+        )
 
     return copied_paths
+
 
 
 def _write_docking_attempt_summary(
@@ -184,25 +237,54 @@ def _write_docking_attempt_summary(
     if not rows:
         return None
 
-    output_path = output_dir / "docking_attempt_summary.csv"
+    output_path = (
+        output_dir
+        / "docking_attempt_summary.csv"
+    )
+
     fieldnames = [
         "compound",
-        "pocket",
-        "raw_poses",
-        "accepted_poses",
-        "rejected_poses",
-        "status",
-        "best_raw_cnn_score",
-        "best_accepted_cnn_score",
     ]
 
-    with output_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+    # Preserve compatibility when older callers
+    # provide no conformer field.
+    if any(
+        "receptor_conformer_id" in row
+        for row in rows
+    ):
+        fieldnames.append(
+            "receptor_conformer_id"
+        )
+
+    fieldnames.extend(
+        [
+            "pocket",
+            "raw_poses",
+            "accepted_poses",
+            "rejected_poses",
+            "status",
+            "best_raw_cnn_score",
+            "best_accepted_cnn_score",
+        ]
+    )
+
+    with output_path.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=fieldnames,
+        )
+
         writer.writeheader()
+
         for row in rows:
             writer.writerow(row)
 
     return output_path
+
 
 
 
@@ -1270,6 +1352,13 @@ def run_pipeline(
                 ),
             )
 
+            receptor_conformers = [
+                (
+                    "submitted_receptor",
+                    receptor,
+                )
+            ]
+
         # Detect geometric pockets on the original protein coordinates.
         # The protonated display structure is retained for validation/output,
         # while GNINA uses the prepared PDBQT receptor.
@@ -1439,12 +1528,12 @@ def run_pipeline(
             total_failures = 0
             ligand_pocket_rows: list[dict[str, object]] = []
             raw_records_by_pocket: dict[
-                str,
+                tuple[str, str],
                 list[PoseRecord],
             ] = {}
 
             valid_records_by_pocket: dict[
-                str,
+                tuple[str, str],
                 list[PoseRecord],
             ] = {}
 
@@ -1453,148 +1542,288 @@ def run_pipeline(
             ] = []
 
             for pocket in pockets:
-                print(f"\n[POCKET RUN] {ligand.name}: {pocket.pocket_id}")
-
-                try:
-                    raw_records = run_gnina_ensemble(
-                        receptor,
-                        ligand,
-                        pocket,
-                        seeds,
-                        work_dir / "docking",
-                        exhaustiveness=exhaustiveness,
-                        num_modes=num_modes,
-                        cnn_scoring=cnn_scoring,
-                        gnina_bin=gnina_bin,
-                        cpu=cpu,
-                        device=device,
-                        timeout_seconds=gnina_timeout_seconds,
+                for (
+                    receptor_conformer_id,
+                    conformer_receptor,
+                ) in receptor_conformers:
+                    attempt_key = (
+                        receptor_conformer_id,
+                        pocket.pocket_id,
                     )
 
-                except CommandTimeoutError as error:
                     print(
-                        "[GNINA TIMEOUT] "
+                        "\n[POCKET RUN] "
+                        f"{ligand.name}: "
+                        f"{receptor_conformer_id}; "
+                        f"{pocket.pocket_id}"
+                    )
+
+                    try:
+                        raw_records = (
+                            run_gnina_ensemble(
+                                conformer_receptor,
+                                ligand,
+                                pocket,
+                                seeds,
+                                work_dir
+                                / "docking",
+                                exhaustiveness=(
+                                    exhaustiveness
+                                ),
+                                num_modes=(
+                                    num_modes
+                                ),
+                                cnn_scoring=(
+                                    cnn_scoring
+                                ),
+                                gnina_bin=gnina_bin,
+                                cpu=cpu,
+                                device=device,
+                                timeout_seconds=(
+                                    gnina_timeout_seconds
+                                ),
+                                receptor_conformer_id=(
+                                    receptor_conformer_id
+                                ),
+                            )
+                        )
+                    except CommandTimeoutError as error:
+                        print(
+                            "[GNINA TIMEOUT] "
+                            f"{ligand.name} "
+                            f"{receptor_conformer_id} "
+                            f"{pocket.pocket_id}: "
+                            "exceeded "
+                            f"{error.timeout_seconds:g} "
+                            "seconds"
+                        )
+
+                        docking_attempt_rows.append(
+                            {
+                                "compound": (
+                                    ligand.name
+                                ),
+                                (
+                                    "receptor_"
+                                    "conformer_id"
+                                ): (
+                                    receptor_conformer_id
+                                ),
+                                "pocket": (
+                                    pocket.pocket_id
+                                ),
+                                "raw_poses": 0,
+                                "accepted_poses": 0,
+                                "rejected_poses": 0,
+                                "status": (
+                                    "timed_out"
+                                ),
+                                (
+                                    "best_raw_"
+                                    "cnn_score"
+                                ): "",
+                                (
+                                    "best_accepted_"
+                                    "cnn_score"
+                                ): "",
+                            }
+                        )
+
+                        print(
+                            "[GNINA TIMEOUT] "
+                            "Continuing to the next "
+                            "conformer-pocket pair."
+                        )
+
+                        continue
+
+                    raw_records_by_pocket[
+                        attempt_key
+                    ] = list(
+                        raw_records
+                    )
+
+                    validity_output_dir = (
+                        work_dir
+                        / "validity"
+                        / ligand.name
+                        / receptor_conformer_id
+                        / pocket.pocket_id
+                    )
+
+                    try:
+                        (
+                            valid_records,
+                            failures,
+                        ) = (
+                            filter_poses_with_posebusters(
+                                raw_records,
+                                (
+                                    conformer_receptor
+                                    .display_pdb
+                                ),
+                                validity_output_dir,
+                                posebusters_bin=(
+                                    posebusters_bin
+                                ),
+                                skip=skip_validity,
+                            )
+                        )
+                    except RuntimeError as error:
+                        if (
+                            "Every GNINA pose failed"
+                            not in str(error)
+                        ):
+                            raise
+
+                        valid_records = []
+                        failures = list(
+                            raw_records
+                        )
+
+                        print(
+                            "[VALIDITY] "
+                            f"{ligand.name} "
+                            f"{receptor_conformer_id} "
+                            f"{pocket.pocket_id}: "
+                            "accepted 0/"
+                            f"{len(raw_records)}; "
+                            "rejected "
+                            f"{len(raw_records)}; "
+                            "skipping this "
+                            "conformer-pocket pair"
+                        )
+
+                    preserved_validity_artifacts = (
+                        _preserve_posebusters_artifacts(
+                            validity_dir=(
+                                validity_output_dir
+                            ),
+                            output_dir=output_dir,
+                            ligand_name=(
+                                ligand.name
+                            ),
+                            pocket_id=(
+                                pocket.pocket_id
+                            ),
+                            receptor_conformer_id=(
+                                receptor_conformer_id
+                            ),
+                        )
+                    )
+
+                    for artifact_path in (
+                        preserved_validity_artifacts
+                    ):
+                        print(
+                            "[VALIDITY] Preserved "
+                            "audit artifact: "
+                            f"{artifact_path}"
+                        )
+
+                    total_failures += len(
+                        failures
+                    )
+
+                    all_valid_records.extend(
+                        valid_records
+                    )
+
+                    valid_records_by_pocket[
+                        attempt_key
+                    ] = list(
+                        valid_records
+                    )
+
+                    print(
+                        "[VALIDITY] "
                         f"{ligand.name} "
-                        f"{pocket.pocket_id}: exceeded "
-                        f"{error.timeout_seconds:g} seconds"
+                        f"{receptor_conformer_id} "
+                        f"{pocket.pocket_id}: "
+                        "accepted "
+                        f"{len(valid_records)}/"
+                        f"{len(raw_records)}; "
+                        "rejected "
+                        f"{len(failures)}"
                     )
 
                     docking_attempt_rows.append(
                         {
-                            "compound": ligand.name,
-                            "pocket": pocket.pocket_id,
-                            "raw_poses": 0,
-                            "accepted_poses": 0,
-                            "rejected_poses": 0,
-                            "status": "timed_out",
-                            "best_raw_cnn_score": "",
-                            "best_accepted_cnn_score": "",
+                            "compound": (
+                                ligand.name
+                            ),
+                            (
+                                "receptor_"
+                                "conformer_id"
+                            ): (
+                                receptor_conformer_id
+                            ),
+                            "pocket": (
+                                pocket.pocket_id
+                            ),
+                            "raw_poses": len(
+                                raw_records
+                            ),
+                            "accepted_poses": len(
+                                valid_records
+                            ),
+                            "rejected_poses": len(
+                                failures
+                            ),
+                            "status": (
+                                "accepted"
+                                if valid_records
+                                else (
+                                    "failed_"
+                                    "posebusters"
+                                )
+                            ),
+                            (
+                                "best_raw_"
+                                "cnn_score"
+                            ): _best_cnn_score_text(
+                                raw_records
+                            ),
+                            (
+                                "best_accepted_"
+                                "cnn_score"
+                            ): _best_cnn_score_text(
+                                valid_records
+                            ),
                         }
                     )
 
-                    print(
-                        "[GNINA TIMEOUT] Continuing to "
-                        "the next pocket."
+                    pocket_attempt_row = (
+                        summarize_pocket_attempt(
+                            ligand_name=(
+                                ligand.name
+                            ),
+                            receptor_conformer_id=(
+                                receptor_conformer_id
+                            ),
+                            pocket=pocket,
+                            raw_records=(
+                                raw_records
+                            ),
+                            accepted_records=(
+                                valid_records
+                            ),
+                            rejected_pose_count=(
+                                len(failures)
+                            ),
+                        )
                     )
 
-                    continue
-
-                raw_records_by_pocket[pocket.pocket_id] = list(
-                    raw_records
-                )
-
-                validity_output_dir = (
-                    work_dir
-                    / "validity"
-                    / ligand.name
-                    / pocket.pocket_id
-                )
-
-                try:
-                    valid_records, failures = filter_poses_with_posebusters(
-                        raw_records,
-                        receptor.display_pdb,
-                        validity_output_dir,
-                        posebusters_bin=posebusters_bin,
-                        skip=skip_validity,
-                    )
-                except RuntimeError as error:
-                    if "Every GNINA pose failed" not in str(error):
-                        raise
-
-                    valid_records = []
-                    failures = list(raw_records)
-
-                    print(
-                        f"[VALIDITY] {ligand.name} {pocket.pocket_id}: "
-                        "accepted 0/"
-                        f"{len(raw_records)}; rejected {len(raw_records)}; "
-                        "skipping this exploratory pocket"
+                    pocket_attempt_row.update(
+                        pocket_biological_scores.get(
+                            pocket.pocket_id,
+                            {},
+                        )
                     )
 
-                preserved_validity_artifacts = (
-                    _preserve_posebusters_artifacts(
-                        validity_dir=validity_output_dir,
-                        output_dir=output_dir,
-                        ligand_name=ligand.name,
-                        pocket_id=pocket.pocket_id,
+                    ligand_pocket_rows.append(
+                        pocket_attempt_row
                     )
-                )
-
-                for artifact_path in (
-                    preserved_validity_artifacts
-                ):
-                    print(
-                        "[VALIDITY] Preserved audit "
-                        f"artifact: {artifact_path}"
-                    )
-
-                total_failures += len(failures)
-                all_valid_records.extend(valid_records)
-
-                valid_records_by_pocket[
-                    pocket.pocket_id
-                ] = list(valid_records)
-
-                print(
-                    f"[VALIDITY] {ligand.name} {pocket.pocket_id}: "
-                    f"accepted {len(valid_records)}/{len(raw_records)}; "
-                    f"rejected {len(failures)}"
-                )
-
-                docking_attempt_rows.append(
-                    {
-                        "compound": ligand.name,
-                        "pocket": pocket.pocket_id,
-                        "raw_poses": len(raw_records),
-                        "accepted_poses": len(valid_records),
-                        "rejected_poses": len(failures),
-                        "status": "accepted" if valid_records else "failed_posebusters",
-                        "best_raw_cnn_score": _best_cnn_score_text(raw_records),
-                        "best_accepted_cnn_score": _best_cnn_score_text(valid_records),
-                    }
-                )
-
-                pocket_attempt_row = (
-                    summarize_pocket_attempt(
-                        ligand_name=ligand.name,
-                        pocket=pocket,
-                        raw_records=raw_records,
-                        accepted_records=valid_records,
-                        rejected_pose_count=len(failures),
-                    )
-                )
-
-                pocket_attempt_row.update(
-                    pocket_biological_scores.get(
-                        pocket.pocket_id,
-                        {},
-                    )
-                )
-
-                ligand_pocket_rows.append(
-                    pocket_attempt_row
-                )
 
             ranked_pocket_rows = rank_pocket_attempts(
                 ligand_pocket_rows
@@ -1610,6 +1839,13 @@ def run_pipeline(
                     selected_pocket["pocket_id"]
                 )
 
+                selected_receptor_conformer_id = str(
+                    selected_pocket.get(
+                        "receptor_conformer_id",
+                        "submitted_receptor",
+                    )
+                )
+
                 records_for_hypotheses = (
                     _accepted_records_for_selected_pocket(
                         valid_records_by_pocket=(
@@ -1618,7 +1854,17 @@ def run_pipeline(
                         selected_pocket_id=(
                             selected_pocket_id
                         ),
+                        selected_receptor_conformer_id=(
+                            selected_receptor_conformer_id
+                        ),
                     )
+                )
+
+                print(
+                    "[RECEPTOR CONFORMER "
+                    "SELECTION] "
+                    f"{ligand.name}: "
+                    f"{selected_receptor_conformer_id}"
                 )
 
                 print(
@@ -1636,15 +1882,19 @@ def run_pipeline(
                 if reference_ligand is not None:
                     selected_records = (
                         raw_records_by_pocket.get(
-                            selected_pocket_id,
+                            (
+                                selected_receptor_conformer_id,
+                                selected_pocket_id,
+                            ),
                             [],
                         )
                     )
 
                     if not selected_records:
                         raise RuntimeError(
-                            "The selected pocket's raw GNINA "
-                            "records could not be located."
+                            "The selected conformer-pocket "
+                            "pair's raw GNINA records could "
+                            "not be located."
                         )
 
                     pose_summary, pose_outputs = (
@@ -1668,7 +1918,13 @@ def run_pipeline(
                         f"Evaluated compound: {ligand.name}"
                     )
                     print(
-                        "[POSE_RECOVERY] Normally selected pocket: "
+                        "[POSE_RECOVERY] Selected "
+                        "receptor conformer: "
+                        f"{selected_receptor_conformer_id}"
+                    )
+                    print(
+                        "[POSE_RECOVERY] Normally "
+                        "selected pocket: "
                         f"{selected_pocket_id}"
                     )
                     print(

@@ -46,9 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Optional absolute path to an "
             "aligned_receptor_ensemble.v0.1 "
             "manifest. Accepted conformers are "
-            "validated and receptor-prepared; "
-            "GNINA remains submitted-receptor "
-            "only in this preparation stage."
+            "validated, receptor-prepared, and "
+            "docked independently using shared "
+            "aligned pocket coordinates."
         ),
     )
     parser.add_argument("--data-root", required=True, help="Absolute external data root")

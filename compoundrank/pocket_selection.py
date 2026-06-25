@@ -66,6 +66,9 @@ def best_pose_record(
 def summarize_pocket_attempt(
     *,
     ligand_name: str,
+    receptor_conformer_id: str = (
+        "submitted_receptor"
+    ),
     pocket: PocketDefinition,
     raw_records: Iterable[PoseRecord],
     accepted_records: Iterable[PoseRecord],
@@ -92,6 +95,9 @@ def summarize_pocket_attempt(
 
     return {
         "compound": ligand_name,
+        "receptor_conformer_id": (
+            receptor_conformer_id
+        ),
         "pocket_id": pocket.pocket_id,
         "pocket_rank": pocket.pocket_rank,
         "fpocket_score": (
@@ -360,6 +366,7 @@ def write_pocket_selection_summary(
 
     fieldnames = [
         "compound",
+        "receptor_conformer_id",
         "selection_rank",
         "selected",
         "pocket_id",
@@ -505,6 +512,20 @@ def write_pocket_selection_summary(
             }
         ),
         "attempt_count": len(row_list),
+        "receptor_conformer_count": len(
+            {
+                str(
+                    row.get(
+                        "receptor_conformer_id",
+                        "submitted_receptor",
+                    )
+                )
+                for row in row_list
+            }
+        ),
+        "selection_unit": (
+            "receptor_conformer_pocket_pair"
+        ),
         "selected_pockets": selected_rows,
         "attempts": row_list,
     }

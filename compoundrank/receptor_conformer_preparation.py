@@ -319,7 +319,7 @@ def write_receptor_conformer_preparation(
             "shared_aligned_pocket_frame"
         ),
         "docking_behavior": (
-            "submitted_receptor_only"
+            "all_prepared_conformers"
         ),
         "source_aligned_ensemble": (
             aligned_ensemble.get(
@@ -336,9 +336,10 @@ def write_receptor_conformer_preparation(
                 "has been prepared for GNINA."
             ),
             (
-                "GNINA still docks only against "
-                "the submitted receptor in this "
-                "preparation milestone."
+                "GNINA may dock independently "
+                "against every prepared receptor "
+                "conformer using the shared "
+                "aligned pocket frame."
             ),
             (
                 "No thermodynamic or population "
