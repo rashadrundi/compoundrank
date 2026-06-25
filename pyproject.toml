@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 compoundrank = "compoundrank.cli:main"
+compoundrank-ensemble = "compoundrank.structure_ensemble:main"
 
 [tool.setuptools.packages.find]
 include = ["compoundrank*"]
