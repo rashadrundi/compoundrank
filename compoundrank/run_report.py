@@ -1245,6 +1245,18 @@ def _render_pose_recovery_section(
 
         return Path(text_value).name
 
+    def format_string_list(value: Any) -> str:
+        if not isinstance(value, list):
+            return "unknown"
+
+        items = [
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        ]
+
+        return ", ".join(items) if items else "unknown"
+
     threshold = _coerce_float(
         summary.get(
             "rmsd_threshold_angstrom"
@@ -1307,6 +1319,18 @@ def _render_pose_recovery_section(
             f"{_format_value(summary.get('evaluated_pocket_id'))}"
         ),
         (
+            "- Normally selected receptor conformer: "
+            f"{_format_value(summary.get('normally_selected_receptor_conformer_id'))}"
+        ),
+        (
+            "- Evaluated receptor conformers: "
+            f"{format_string_list(summary.get('evaluated_receptor_conformer_ids'))}"
+        ),
+        (
+            "- Evaluated receptor conformer count: "
+            f"{_format_value(summary.get('evaluated_receptor_conformer_count'))}"
+        ),
+        (
             "- Evaluation stage: "
             f"{_format_value(summary.get('evaluation_stage'))}"
         ),
@@ -1346,6 +1370,22 @@ def _render_pose_recovery_section(
             f"{_format_value(top_pose.get('pose_index'))} |"
         ),
         (
+            "| Top CNN receptor conformer | "
+            f"{_format_value(top_pose.get('receptor_conformer_id'))} |"
+        ),
+        (
+            "| Top CNN seed | "
+            f"{_format_value(top_pose.get('seed'))} |"
+        ),
+        (
+            "| Top CNN source pose | "
+            f"{_format_value(top_pose.get('source_pose_number'))} |"
+        ),
+        (
+            "| Top CNN pocket | "
+            f"{_format_value(top_pose.get('pocket_id'))} |"
+        ),
+        (
             "| Top CNN score | "
             f"{format_float(top_pose.get('cnnscore'), decimals=6)} |"
         ),
@@ -1356,6 +1396,22 @@ def _render_pose_recovery_section(
         (
             "| Best sampled pose index | "
             f"{_format_value(best_pose.get('pose_index'))} |"
+        ),
+        (
+            "| Best sampled receptor conformer | "
+            f"{_format_value(best_pose.get('receptor_conformer_id'))} |"
+        ),
+        (
+            "| Best sampled seed | "
+            f"{_format_value(best_pose.get('seed'))} |"
+        ),
+        (
+            "| Best sampled source pose | "
+            f"{_format_value(best_pose.get('source_pose_number'))} |"
+        ),
+        (
+            "| Best sampled pocket | "
+            f"{_format_value(best_pose.get('pocket_id'))} |"
         ),
         (
             "| Best sampled pose RMSD | "

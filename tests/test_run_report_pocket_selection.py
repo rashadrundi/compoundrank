@@ -259,16 +259,28 @@ class RunReportPocketSelectionTests(
                 "mapping_failure_count": 0,
                 "top_cnn_pose": {
                     "pose_index": 1,
+                    "receptor_conformer_id": (
+                        "snapshot_0001"
+                    ),
+                    "seed": 20260626,
+                    "source_pose_number": 1,
+                    "pocket_id": "autobox_01",
                     "cnnscore": 0.823432922,
                     "heavy_atom_rmsd": (
                         1.4892266332345574
                     ),
                 },
                 "best_sampled_pose": {
-                    "pose_index": 1,
-                    "cnnscore": 0.823432922,
+                    "pose_index": 7,
+                    "receptor_conformer_id": (
+                        "submitted_receptor"
+                    ),
+                    "seed": 20260627,
+                    "source_pose_number": 4,
+                    "pocket_id": "autobox_01",
+                    "cnnscore": 0.701234,
                     "heavy_atom_rmsd": (
-                        1.4892266332345574
+                        1.201234
                     ),
                 },
                 "sampling_pass": True,
@@ -283,6 +295,15 @@ class RunReportPocketSelectionTests(
                 "evaluated_pocket_id": (
                     "autobox_01"
                 ),
+                "normally_selected_receptor_conformer_id": (
+                    "snapshot_0001"
+                ),
+                "evaluated_receptor_conformer_ids": [
+                    "snapshot_0001",
+                    "snapshot_0002",
+                    "submitted_receptor",
+                ],
+                "evaluated_receptor_conformer_count": 3,
                 "evaluation_stage": (
                     "after normal GNINA scoring, "
                     "PoseBusters filtering, and "
@@ -354,7 +375,64 @@ class RunReportPocketSelectionTests(
                 report,
             )
             self.assertIn(
-                "Best sampled pose RMSD | 1.489 Å",
+                "Best sampled pose RMSD | 1.201 Å",
+                report,
+            )
+            self.assertIn(
+                (
+                    "Normally selected receptor conformer: "
+                    "snapshot_0001"
+                ),
+                report,
+            )
+            self.assertIn(
+                (
+                    "Evaluated receptor conformers: "
+                    "snapshot_0001, snapshot_0002, "
+                    "submitted_receptor"
+                ),
+                report,
+            )
+            self.assertIn(
+                "Evaluated receptor conformer count: 3",
+                report,
+            )
+            self.assertIn(
+                (
+                    "Top CNN receptor conformer | "
+                    "snapshot_0001"
+                ),
+                report,
+            )
+            self.assertIn(
+                "Top CNN seed | 20260626",
+                report,
+            )
+            self.assertIn(
+                "Top CNN source pose | 1",
+                report,
+            )
+            self.assertIn(
+                "Top CNN pocket | autobox_01",
+                report,
+            )
+            self.assertIn(
+                (
+                    "Best sampled receptor conformer | "
+                    "submitted_receptor"
+                ),
+                report,
+            )
+            self.assertIn(
+                "Best sampled seed | 20260627",
+                report,
+            )
+            self.assertIn(
+                "Best sampled source pose | 4",
+                report,
+            )
+            self.assertIn(
+                "Best sampled pocket | autobox_01",
                 report,
             )
             self.assertIn(
