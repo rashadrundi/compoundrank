@@ -730,6 +730,35 @@ def evaluate_scored_pose_sdf(
         pose_records.append(
             {
                 "pose_index": pose_index,
+                "receptor_conformer_id": (
+                    molecule.GetProp(
+                        "receptor_conformer_id"
+                    )
+                    if molecule.HasProp(
+                        "receptor_conformer_id"
+                    )
+                    else None
+                ),
+                "seed": (
+                    int(molecule.GetProp("seed"))
+                    if molecule.HasProp("seed")
+                    else None
+                ),
+                "source_pose_number": (
+                    int(molecule.GetProp("pose_number"))
+                    if molecule.HasProp("pose_number")
+                    else None
+                ),
+                "pocket_id": (
+                    molecule.GetProp("pocket_id")
+                    if molecule.HasProp("pocket_id")
+                    else None
+                ),
+                "pocket_rank": (
+                    int(molecule.GetProp("pocket_rank"))
+                    if molecule.HasProp("pocket_rank")
+                    else None
+                ),
                 "cnnscore": cnnscore,
                 "cnnaffinity": (
                     _molecule_property_float(
@@ -926,6 +955,15 @@ def write_scored_pose_outputs(
         "best_sampled_pose"
     ]
 
+    top_conformer = (
+        top_pose.get("receptor_conformer_id")
+        or "not recorded"
+    )
+    best_conformer = (
+        best_pose.get("receptor_conformer_id")
+        or "not recorded"
+    )
+
     report = f"""# Scored Pose-Recovery Report
 
 ## Inputs
@@ -942,9 +980,15 @@ def write_scored_pose_outputs(
 | Chemically mapped poses | {summary['mapped_pose_count']} |
 | Mapping failures | {summary['mapping_failure_count']} |
 | Top CNN pose index | {top_pose['pose_index']} |
+| Top CNN receptor conformer | {top_conformer} |
+| Top CNN seed | {top_pose.get('seed')} |
+| Top CNN source pose | {top_pose.get('source_pose_number')} |
 | Top CNN score | {top_pose['cnnscore']:.6f} |
 | Top CNN pose RMSD | {top_pose['heavy_atom_rmsd']:.3f} Å |
 | Best sampled pose index | {best_pose['pose_index']} |
+| Best sampled receptor conformer | {best_conformer} |
+| Best sampled seed | {best_pose.get('seed')} |
+| Best sampled source pose | {best_pose.get('source_pose_number')} |
 | Best sampled RMSD | {best_pose['heavy_atom_rmsd']:.3f} Å |
 | Sampling pass | {'yes' if summary['sampling_pass'] else 'no'} |
 | Ranking pass | {'yes' if summary['ranking_pass'] else 'no'} |

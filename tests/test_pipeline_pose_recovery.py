@@ -8,6 +8,7 @@ from rdkit.Geometry import Point3D
 from compoundrank.models import PoseRecord
 from compoundrank.pipeline import (
     _accepted_records_for_selected_pocket,
+    _raw_records_for_selected_pocket_across_conformers,
     _run_selected_pocket_pose_recovery,
 )
 
@@ -80,7 +81,7 @@ class PipelinePoseRecoveryTests(
                 -8.0,
             )
 
-            second = molecule_at_offset(3.0)
+            second = molecule_at_offset(0.5)
             second.SetDoubleProp(
                 "CNNscore",
                 0.5,
@@ -109,6 +110,9 @@ class PipelinePoseRecoveryTests(
                     pocket_id="fpocket_02",
                     pocket_rank=2,
                     fpocket_score=0.2,
+                    receptor_conformer_id=(
+                        "snapshot_0001"
+                    ),
                 ),
                 PoseRecord(
                     ligand_name="example",
@@ -124,6 +128,9 @@ class PipelinePoseRecoveryTests(
                     pocket_id="fpocket_02",
                     pocket_rank=2,
                     fpocket_score=0.2,
+                    receptor_conformer_id=(
+                        "submitted_receptor"
+                    ),
                 ),
             ]
 
@@ -137,6 +144,9 @@ class PipelinePoseRecoveryTests(
                     ligand_name="example",
                     pocket_id="fpocket_02",
                     rmsd_threshold=2.0,
+                    selected_receptor_conformer_id=(
+                        "snapshot_0001"
+                    ),
                 )
             )
 
@@ -161,6 +171,55 @@ class PipelinePoseRecoveryTests(
                 summary[
                     "reference_ligand_used_for_docking"
                 ]
+            )
+            self.assertEqual(
+                summary[
+                    "normally_selected_receptor_conformer_id"
+                ],
+                "snapshot_0001",
+            )
+            self.assertEqual(
+                summary[
+                    "evaluated_receptor_conformer_ids"
+                ],
+                [
+                    "snapshot_0001",
+                    "submitted_receptor",
+                ],
+            )
+            self.assertEqual(
+                summary[
+                    "evaluated_receptor_conformer_count"
+                ],
+                2,
+            )
+            self.assertEqual(
+                summary["top_cnn_pose"][
+                    "receptor_conformer_id"
+                ],
+                "snapshot_0001",
+            )
+            self.assertEqual(
+                summary["best_sampled_pose"][
+                    "receptor_conformer_id"
+                ],
+                "submitted_receptor",
+            )
+            self.assertAlmostEqual(
+                summary["best_sampled_pose"][
+                    "heavy_atom_rmsd"
+                ],
+                0.5,
+            )
+            self.assertEqual(
+                summary["top_cnn_pose"]["seed"],
+                100,
+            )
+            self.assertEqual(
+                summary["top_cnn_pose"][
+                    "source_pose_number"
+                ],
+                1,
             )
             self.assertAlmostEqual(
                 summary["top_cnn_pose"][
@@ -249,6 +308,73 @@ class PipelinePoseRecoveryTests(
             false_high_score_record,
             records,
         )
+
+
+    def test_raw_selected_pocket_records_include_all_conformers(
+        self,
+    ) -> None:
+        submitted = PoseRecord(
+            ligand_name="example",
+            seed=100,
+            pose_number=1,
+            molecule=None,
+            cnn_score=0.50,
+            cnn_affinity=5.0,
+            minimized_affinity=-6.0,
+            source_sdf=Path("submitted/poses.sdf"),
+            pocket_id="selected_pocket",
+            receptor_conformer_id="submitted_receptor",
+        )
+        snapshot = PoseRecord(
+            ligand_name="example",
+            seed=200,
+            pose_number=1,
+            molecule=None,
+            cnn_score=0.60,
+            cnn_affinity=6.0,
+            minimized_affinity=-7.0,
+            source_sdf=Path("snapshot/poses.sdf"),
+            pocket_id="selected_pocket",
+            receptor_conformer_id="snapshot_0001",
+        )
+        decoy = PoseRecord(
+            ligand_name="example",
+            seed=200,
+            pose_number=2,
+            molecule=None,
+            cnn_score=0.99,
+            cnn_affinity=9.0,
+            minimized_affinity=-9.0,
+            source_sdf=Path("decoy/poses.sdf"),
+            pocket_id="decoy_pocket",
+            receptor_conformer_id="snapshot_0001",
+        )
+
+        records = (
+            _raw_records_for_selected_pocket_across_conformers(
+                raw_records_by_pocket={
+                    (
+                        "submitted_receptor",
+                        "selected_pocket",
+                    ): [submitted],
+                    (
+                        "snapshot_0001",
+                        "selected_pocket",
+                    ): [snapshot],
+                    (
+                        "snapshot_0001",
+                        "decoy_pocket",
+                    ): [decoy],
+                },
+                selected_pocket_id="selected_pocket",
+            )
+        )
+
+        self.assertEqual(
+            records,
+            [submitted, snapshot],
+        )
+        self.assertNotIn(decoy, records)
 
 
 

@@ -146,6 +146,30 @@ def _best_cnn_score_text(records: list[object]) -> str:
     return f"{max(scores):.9f}"
 
 
+def _raw_records_for_selected_pocket_across_conformers(
+    *,
+    raw_records_by_pocket: dict[
+        tuple[str, str] | str,
+        list[PoseRecord],
+    ],
+    selected_pocket_id: str,
+) -> list[PoseRecord]:
+    """Return raw poses for one pocket across all conformers."""
+    selected_records: list[PoseRecord] = []
+
+    for key, records in raw_records_by_pocket.items():
+        pocket_id = (
+            key[1]
+            if isinstance(key, tuple)
+            else key
+        )
+
+        if pocket_id == selected_pocket_id:
+            selected_records.extend(records)
+
+    return selected_records
+
+
 def _preserve_posebusters_artifacts(
     *,
     validity_dir: Path,
@@ -347,6 +371,18 @@ def _write_pose_records_sdf(
                 int(record.pose_number),
             )
             molecule.SetProp(
+                "receptor_conformer_id",
+                str(record.receptor_conformer_id),
+            )
+            molecule.SetIntProp(
+                "seed",
+                int(record.seed),
+            )
+            molecule.SetIntProp(
+                "pose_number",
+                int(record.pose_number),
+            )
+            molecule.SetProp(
                 "pocket_id",
                 str(record.pocket_id),
             )
@@ -386,9 +422,10 @@ def _run_selected_pocket_pose_recovery(
     ligand_name: str,
     pocket_id: str,
     rmsd_threshold: float,
+    selected_receptor_conformer_id: str | None = None,
     autobox_ligand: Path | None = None,
 ) -> tuple[dict[str, object], dict[str, Path]]:
-    """Evaluate the selected pocket only after ordinary selection."""
+    """Evaluate the selected pocket across all receptor conformers."""
     pose_set_path = (
         output_dir
         / "pose_recovery_selected_pocket_poses.sdf"
@@ -419,10 +456,26 @@ def _run_selected_pocket_pose_recovery(
                 == str(autobox_ligand)
             )
 
+    evaluated_conformer_ids = sorted(
+        {
+            str(record.receptor_conformer_id)
+            for record in records
+        }
+    )
+
     summary.update(
         {
             "evaluated_compound": ligand_name,
             "evaluated_pocket_id": pocket_id,
+            "normally_selected_receptor_conformer_id": (
+                selected_receptor_conformer_id
+            ),
+            "evaluated_receptor_conformer_ids": (
+                evaluated_conformer_ids
+            ),
+            "evaluated_receptor_conformer_count": len(
+                evaluated_conformer_ids
+            ),
             "evaluation_stage": (
                 "after normal GNINA scoring, "
                 "PoseBusters filtering, and "
@@ -446,7 +499,8 @@ def _run_selected_pocket_pose_recovery(
             ),
             "evaluated_pose_source": (
                 "all raw GNINA poses from the normally "
-                "selected pocket across configured seeds"
+                "selected pocket across every docked "
+                "receptor conformer and configured seed"
             ),
         }
     )
@@ -1881,20 +1935,21 @@ def run_pipeline(
 
                 if reference_ligand is not None:
                     selected_records = (
-                        raw_records_by_pocket.get(
-                            (
-                                selected_receptor_conformer_id,
-                                selected_pocket_id,
+                        _raw_records_for_selected_pocket_across_conformers(
+                            raw_records_by_pocket=(
+                                raw_records_by_pocket
                             ),
-                            [],
+                            selected_pocket_id=(
+                                selected_pocket_id
+                            ),
                         )
                     )
 
                     if not selected_records:
                         raise RuntimeError(
-                            "The selected conformer-pocket "
-                            "pair's raw GNINA records could "
-                            "not be located."
+                            "Raw GNINA records for the "
+                            "selected pocket could not be "
+                            "located across the receptor ensemble."
                         )
 
                     pose_summary, pose_outputs = (
@@ -1906,6 +1961,9 @@ def run_pipeline(
                             pocket_id=selected_pocket_id,
                             rmsd_threshold=(
                                 pose_recovery_rmsd_threshold
+                            ),
+                            selected_receptor_conformer_id=(
+                                selected_receptor_conformer_id
                             ),
                             autobox_ligand=(
                                 autobox_ligand
@@ -1927,13 +1985,40 @@ def run_pipeline(
                         "selected pocket: "
                         f"{selected_pocket_id}"
                     )
+                    top_recovery_pose = (
+                        pose_summary["top_cnn_pose"]
+                    )
+                    best_recovery_pose = (
+                        pose_summary["best_sampled_pose"]
+                    )
+
                     print(
-                        "[POSE_RECOVERY] Top CNN pose RMSD: "
-                        f"{pose_summary['top_cnn_pose']['heavy_atom_rmsd']:.3f} Å"
+                        "[POSE_RECOVERY] Evaluated receptor "
+                        "conformers: "
+                        + ", ".join(
+                            pose_summary.get(
+                                "evaluated_receptor_conformer_ids",
+                                [],
+                            )
+                        )
                     )
                     print(
-                        "[POSE_RECOVERY] Best sampled RMSD: "
-                        f"{pose_summary['best_sampled_pose']['heavy_atom_rmsd']:.3f} Å"
+                        "[POSE_RECOVERY] Top CNN pose: "
+                        f"conformer="
+                        f"{top_recovery_pose.get('receptor_conformer_id')}; "
+                        f"seed={top_recovery_pose.get('seed')}; "
+                        f"pose={top_recovery_pose.get('source_pose_number')}; "
+                        f"RMSD="
+                        f"{top_recovery_pose['heavy_atom_rmsd']:.3f} Å"
+                    )
+                    print(
+                        "[POSE_RECOVERY] Best sampled pose: "
+                        f"conformer="
+                        f"{best_recovery_pose.get('receptor_conformer_id')}; "
+                        f"seed={best_recovery_pose.get('seed')}; "
+                        f"pose={best_recovery_pose.get('source_pose_number')}; "
+                        f"RMSD="
+                        f"{best_recovery_pose['heavy_atom_rmsd']:.3f} Å"
                     )
                     print(
                         "[POSE_RECOVERY] Sampling pass: "
