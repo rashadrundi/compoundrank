@@ -1722,6 +1722,264 @@ def _render_structure_validation_section(
     return lines
 
 
+def _render_structure_pocket_quality_section(
+    output_dir: Path,
+) -> list[str]:
+    report_path = (
+        output_dir
+        / "structure_pocket_quality.json"
+    )
+
+    try:
+        report = _load_json(report_path)
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ) as error:
+        return [
+            "### Pocket-Localized Structure Quality",
+            "",
+            (
+                "- Status: report could not be read: "
+                f"`{type(error).__name__}`"
+            ),
+            "",
+        ]
+
+    if report is None:
+        return []
+
+    def string_list(
+        value: Any,
+    ) -> list[str]:
+        if not isinstance(value, list):
+            return []
+
+        return [
+            str(item)
+            for item in value
+        ]
+
+    def display_identifier(
+        value: Any,
+    ) -> str:
+        text = str(
+            value
+            if value is not None
+            else "unknown"
+        ).replace("_", " ")
+
+        if not text:
+            return "Unknown"
+
+        return text[0].upper() + text[1:]
+
+    status = display_identifier(
+        report.get("status")
+    )
+    verdict_raw = str(
+        report.get(
+            "verdict",
+            "unknown",
+        )
+    )
+    verdict = display_identifier(
+        verdict_raw
+    )
+
+    selected_pockets = string_list(
+        report.get("selected_pocket_ids")
+    )
+    inside_outliers = string_list(
+        report.get(
+            "inside_selected_box_outliers"
+        )
+    )
+    near_outliers = string_list(
+        report.get(
+            "near_selected_box_outliers"
+        )
+    )
+    local_outliers = string_list(
+        report.get(
+            "selected_box_local_outliers"
+        )
+    )
+
+    selected_text = (
+        ", ".join(
+            f"`{pocket_id}`"
+            for pocket_id in selected_pockets
+        )
+        if selected_pockets
+        else "none recorded"
+    )
+
+    try:
+        threshold_text = (
+            f"{float(report.get(
+                'near_box_threshold_angstrom'
+            )):.1f} Å"
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        threshold_text = "unknown"
+
+    global_summary = report.get(
+        "global_ramachandran_summary",
+        {},
+    )
+
+    if not isinstance(
+        global_summary,
+        dict,
+    ):
+        global_summary = {}
+
+    screening_flag = display_identifier(
+        global_summary.get(
+            "screening_flag"
+        )
+    )
+
+    lines = [
+        "### Pocket-Localized Structure Quality",
+        "",
+        (
+            "This assessment contextualizes "
+            "Ramachandran outliers against the "
+            "docking boxes selected for the "
+            "reported compounds."
+        ),
+        "",
+        f"- Status: **{status}**",
+        f"- Verdict: **{verdict}**",
+        (
+            "- Global Ramachandran screening flag: "
+            f"`{screening_flag}`"
+        ),
+        (
+            "- Selected docking pockets: "
+            f"{selected_text}"
+        ),
+        (
+            "- Global Ramachandran outliers: "
+            f"{_format_value(
+                report.get('outlier_count')
+            )}"
+        ),
+        (
+            "- Outliers inside selected docking "
+            f"boxes: {len(inside_outliers)}"
+        ),
+        (
+            "- Outliers within the configured "
+            f"near-box threshold: {len(near_outliers)}"
+        ),
+        (
+            "- Configured near-box threshold: "
+            f"{threshold_text}"
+        ),
+        (
+            "- Analysis artifact: "
+            f"`{_relative_or_original(
+                output_dir,
+                report_path,
+            )}`"
+        ),
+        "",
+    ]
+
+    if verdict_raw == "strong":
+        lines.append(
+            "The receptor met the configured global "
+            "Ramachandran goals and no identified "
+            "outlier was localized to a selected "
+            "docking box."
+        )
+
+    elif (
+        verdict_raw
+        == "usable_with_global_geometry_caution"
+    ):
+        lines.append(
+            "The receptor did not meet the strict "
+            "global Ramachandran screening goals, "
+            "but none of its identified backbone "
+            "outliers occurred inside or near a "
+            "selected docking box."
+        )
+
+    elif (
+        verdict_raw
+        == "manual_review_of_selected_pocket"
+    ):
+        lines.append(
+            "At least one Ramachandran outlier lies "
+            "near a selected docking box. The local "
+            "residue environment should be reviewed "
+            "before relying on the affected docking "
+            "result."
+        )
+
+    elif (
+        verdict_raw
+        == "selected_pocket_geometry_concern"
+    ):
+        lines.append(
+            "At least one Ramachandran outlier lies "
+            "inside a selected docking box. The "
+            "affected pocket, structure, or alternate "
+            "conformer should be reviewed before the "
+            "docking result is treated as reliable."
+        )
+
+    elif verdict_raw.startswith(
+        "manual_review_"
+    ):
+        lines.append(
+            "The assessment could not resolve every "
+            "selected-pocket geometry question and "
+            "requires manual structural review."
+        )
+
+    else:
+        lines.append(
+            "Review the structure-pocket quality "
+            "artifact before interpreting the "
+            "selected docking results."
+        )
+
+    if local_outliers:
+        lines += [
+            "",
+            (
+                "- Selected-box-local outlier "
+                "residues: "
+                + ", ".join(
+                    f"`{residue}`"
+                    for residue in local_outliers
+                )
+            ),
+        ]
+
+    lines += [
+        "",
+        (
+            "_Distances are measured to padded GNINA "
+            "docking boxes, not directly to the "
+            "physical pocket surface or functional "
+            "site. Distal outliers may still affect "
+            "global domain arrangement or dynamics._"
+        ),
+        "",
+    ]
+
+    return lines
+
+
 def render_run_report(
     *,
     output_dir: Path,
@@ -1738,6 +1996,11 @@ def render_run_report(
     lines.extend(_render_target_section(target_evidence))
     lines.extend(
         _render_structure_validation_section(
+            output_dir
+        )
+    )
+    lines.extend(
+        _render_structure_pocket_quality_section(
             output_dir
         )
     )
