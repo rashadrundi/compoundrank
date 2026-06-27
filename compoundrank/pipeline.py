@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from rdkit import Chem
 
@@ -929,6 +930,513 @@ def _run_structure_validation(
     return result
 
 
+def _run_receptor_conformer_validations(
+    *,
+    receptor_conformers: list[
+        tuple[str, Any]
+    ],
+    output_dir: Path,
+    chain_id: str | None,
+    submitted_validation: dict[str, Any],
+    validation_fn=_run_structure_validation,
+) -> dict[str, dict[str, Any]]:
+    results: dict[
+        str,
+        dict[str, Any],
+    ] = {
+        "submitted_receptor": (
+            submitted_validation
+        )
+    }
+
+    seen_ids: set[str] = set()
+
+    for conformer_id_value, receptor in (
+        receptor_conformers
+    ):
+        conformer_id = str(
+            conformer_id_value
+        ).strip()
+
+        if not conformer_id:
+            raise ValueError(
+                "Receptor conformer ID cannot "
+                "be empty"
+            )
+
+        if (
+            "/" in conformer_id
+            or "\\" in conformer_id
+        ):
+            raise ValueError(
+                "Receptor conformer ID cannot "
+                "contain path separators: "
+                f"{conformer_id!r}"
+            )
+
+        if conformer_id in seen_ids:
+            raise ValueError(
+                "Duplicate receptor conformer ID: "
+                f"{conformer_id}"
+            )
+
+        seen_ids.add(
+            conformer_id
+        )
+
+        if conformer_id == (
+            "submitted_receptor"
+        ):
+            continue
+
+        result = validation_fn(
+            structure_path=Path(
+                receptor.source_pdb
+            ),
+            output_dir=(
+                output_dir
+                / "structure_validation"
+                / "receptor_conformers"
+                / conformer_id
+            ),
+            chain_id=chain_id,
+            label=(
+                "receptor conformer "
+                f"{conformer_id}"
+            ),
+        )
+
+        results[conformer_id] = result
+
+    return results
+
+
+STRUCTURE_POCKET_QUALITY_ENSEMBLE_SCHEMA_VERSION = (
+    "structure_pocket_quality_ensemble.v0.1"
+)
+
+
+def _structure_pocket_verdict_priority(
+    verdict: str,
+) -> int:
+    priorities = {
+        "strong": 0,
+        "usable_with_global_geometry_caution": 1,
+        "manual_review_of_selected_pocket": 2,
+        "selected_pocket_geometry_concern": 3,
+        "manual_review_missing_selected_pocket_geometry": 4,
+        "manual_review_unresolved_outlier_residues": 4,
+    }
+
+    if verdict.startswith("manual_review_"):
+        return 4
+
+    return priorities.get(
+        verdict,
+        5,
+    )
+
+
+def _run_selected_conformer_structure_pocket_quality(
+    *,
+    selected_conformer_ids: set[str],
+    receptor_conformers: list[
+        tuple[str, Any]
+    ],
+    receptor_structure_validations: dict[
+        str,
+        dict[str, Any],
+    ],
+    pocket_definitions_path: Path,
+    pocket_selection_summary_path: Path,
+    output_dir: Path,
+    quality_runner=run_structure_pocket_quality,
+) -> dict[str, Any]:
+    normalized_selected_ids = {
+        str(conformer_id).strip()
+        for conformer_id in selected_conformer_ids
+        if str(conformer_id).strip()
+    }
+
+    receptor_by_id: dict[str, Any] = {}
+
+    for conformer_id_value, receptor in (
+        receptor_conformers
+    ):
+        conformer_id = str(
+            conformer_id_value
+        ).strip()
+
+        if not conformer_id:
+            raise ValueError(
+                "Receptor conformer ID cannot "
+                "be empty."
+            )
+
+        if conformer_id in receptor_by_id:
+            raise ValueError(
+                "Duplicate receptor conformer ID: "
+                f"{conformer_id}"
+            )
+
+        receptor_by_id[conformer_id] = receptor
+
+    records: list[dict[str, Any]] = []
+
+    for conformer_id in sorted(
+        normalized_selected_ids
+    ):
+        receptor = receptor_by_id.get(
+            conformer_id
+        )
+
+        if receptor is None:
+            records.append(
+                {
+                    "receptor_conformer_id": (
+                        conformer_id
+                    ),
+                    "status": "skipped",
+                    "reason_code": (
+                        "prepared_conformer_missing"
+                    ),
+                    "reason": (
+                        "No prepared receptor was "
+                        "available for the selected "
+                        f"conformer {conformer_id}."
+                    ),
+                }
+            )
+            continue
+
+        validation = (
+            receptor_structure_validations.get(
+                conformer_id,
+                {},
+            )
+        )
+
+        if not isinstance(validation, dict):
+            validation = {}
+
+        validation_report = validation.get(
+            "report",
+            {},
+        )
+        validation_outputs = validation.get(
+            "outputs",
+            {},
+        )
+
+        if not isinstance(
+            validation_report,
+            dict,
+        ):
+            validation_report = {}
+
+        if not isinstance(
+            validation_outputs,
+            dict,
+        ):
+            validation_outputs = {}
+
+        ramachandran_json = (
+            validation_outputs.get("json")
+        )
+
+        if (
+            validation_report.get("status")
+            != "complete"
+        ):
+            records.append(
+                {
+                    "receptor_conformer_id": (
+                        conformer_id
+                    ),
+                    "status": "skipped",
+                    "source_structure": str(
+                        receptor.source_pdb
+                    ),
+                    "reason_code": (
+                        "ramachandran_validation_"
+                        "incomplete"
+                    ),
+                    "reason": (
+                        "Conformer-specific "
+                        "Ramachandran validation "
+                        "was not complete."
+                    ),
+                }
+            )
+            continue
+
+        if not ramachandran_json:
+            records.append(
+                {
+                    "receptor_conformer_id": (
+                        conformer_id
+                    ),
+                    "status": "skipped",
+                    "source_structure": str(
+                        receptor.source_pdb
+                    ),
+                    "reason_code": (
+                        "ramachandran_report_missing"
+                    ),
+                    "reason": (
+                        "The conformer-specific "
+                        "Ramachandran JSON path "
+                        "was unavailable."
+                    ),
+                }
+            )
+            continue
+
+        try:
+            result = quality_runner(
+                structure_path=Path(
+                    receptor.source_pdb
+                ),
+                ramachandran_report_path=Path(
+                    ramachandran_json
+                ),
+                pocket_definitions_path=(
+                    pocket_definitions_path
+                ),
+                pocket_selection_summary_path=(
+                    pocket_selection_summary_path
+                ),
+                output_dir=output_dir,
+                receptor_conformer_id=(
+                    conformer_id
+                ),
+            )
+
+            quality_report = result.get(
+                "report",
+                {},
+            )
+
+            if not isinstance(
+                quality_report,
+                dict,
+            ):
+                raise TypeError(
+                    "Structure-pocket quality "
+                    "runner returned no report."
+                )
+
+            local_outliers = (
+                quality_report.get(
+                    "selected_box_local_outliers",
+                    [],
+                )
+            )
+
+            if not isinstance(
+                local_outliers,
+                list,
+            ):
+                local_outliers = []
+
+            record = {
+                "receptor_conformer_id": (
+                    conformer_id
+                ),
+                "status": "complete",
+                "source_structure": str(
+                    receptor.source_pdb
+                ),
+                "ramachandran_report": str(
+                    ramachandran_json
+                ),
+                "selected_pocket_ids": (
+                    quality_report.get(
+                        "selected_pocket_ids",
+                        [],
+                    )
+                ),
+                "outlier_count": (
+                    quality_report.get(
+                        "outlier_count"
+                    )
+                ),
+                "selected_box_local_outliers": (
+                    local_outliers
+                ),
+                "selected_box_local_outlier_count": (
+                    len(local_outliers)
+                ),
+                "verdict": quality_report.get(
+                    "verdict",
+                    "unknown",
+                ),
+                "report_path": str(
+                    result["output_path"]
+                ),
+            }
+
+            records.append(record)
+
+            # Preserve the legacy artifact for an
+            # ordinary single-receptor run while the
+            # run-report renderer is being upgraded.
+            if (
+                len(receptor_by_id) == 1
+                and conformer_id
+                == "submitted_receptor"
+            ):
+                legacy_path = (
+                    output_dir
+                    / "structure_pocket_quality.json"
+                )
+                legacy_path.write_text(
+                    json.dumps(
+                        quality_report,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                record["legacy_report_path"] = str(
+                    legacy_path
+                )
+
+        except Exception as error:
+            records.append(
+                {
+                    "receptor_conformer_id": (
+                        conformer_id
+                    ),
+                    "status": "failed",
+                    "source_structure": str(
+                        receptor.source_pdb
+                    ),
+                    "reason_code": (
+                        "structure_pocket_quality_"
+                        "failed"
+                    ),
+                    "reason": (
+                        f"{type(error).__name__}: "
+                        f"{error}"
+                    ),
+                }
+            )
+
+    complete_records = [
+        record
+        for record in records
+        if record.get("status") == "complete"
+    ]
+
+    incomplete_records = [
+        record
+        for record in records
+        if record.get("status") != "complete"
+    ]
+
+    if not normalized_selected_ids:
+        status = "skipped"
+        overall_verdict = "not_evaluated"
+
+    elif incomplete_records:
+        status = (
+            "partial"
+            if complete_records
+            else "failed"
+        )
+        overall_verdict = (
+            "manual_review_incomplete_"
+            "conformer_quality"
+        )
+
+    else:
+        status = "complete"
+
+        verdicts = [
+            str(
+                record.get(
+                    "verdict",
+                    "unknown",
+                )
+            )
+            for record in complete_records
+        ]
+
+        overall_verdict = max(
+            verdicts,
+            key=(
+                _structure_pocket_verdict_priority
+            ),
+        )
+
+    payload = {
+        "schema_version": (
+            STRUCTURE_POCKET_QUALITY_ENSEMBLE_SCHEMA_VERSION
+        ),
+        "status": status,
+        "selected_conformer_count": len(
+            normalized_selected_ids
+        ),
+        "completed_conformer_count": len(
+            complete_records
+        ),
+        "incomplete_conformer_count": len(
+            incomplete_records
+        ),
+        "overall_verdict": overall_verdict,
+        "pocket_definitions": str(
+            pocket_definitions_path
+        ),
+        "pocket_selection_summary": str(
+            pocket_selection_summary_path
+        ),
+        "conformers": records,
+        "limitations": [
+            (
+                "Only receptor conformers selected "
+                "by at least one compound are "
+                "evaluated here."
+            ),
+            (
+                "The overall verdict reflects the "
+                "most concerning selected-conformer "
+                "verdict."
+            ),
+            (
+                "Distances are measured to padded "
+                "GNINA docking boxes rather than "
+                "directly to molecular pocket "
+                "surfaces."
+            ),
+        ],
+    }
+
+    aggregate_path = (
+        output_dir
+        / "structure_pocket_quality_ensemble.json"
+    )
+    aggregate_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    aggregate_path.write_text(
+        json.dumps(
+            payload,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    return {
+        "report": payload,
+        "output_path": aggregate_path,
+    }
+
+
 def run_pipeline(
     *,
     receptor_pdb: Path,
@@ -1027,6 +1535,7 @@ def run_pipeline(
         for filename in (
             "pocket_biological_evidence.json",
             "structure_pocket_quality.json",
+            "structure_pocket_quality_ensemble.json",
             "pose_recovery_selected_pocket_poses.sdf",
             "pose_set_recovery_summary.json",
             "pose_set_recovery_metrics.csv",
@@ -1036,6 +1545,21 @@ def run_pipeline(
 
             if stale_path.exists():
                 stale_path.unlink()
+
+        quality_directory = (
+            output_dir
+            / "structure_pocket_quality"
+        )
+
+        if (
+            quality_directory.is_symlink()
+            or quality_directory.is_file()
+        ):
+            quality_directory.unlink()
+        elif quality_directory.is_dir():
+            shutil.rmtree(
+                quality_directory
+            )
 
     validate_receptor_ensemble_options(
         receptor_ensemble_json,
@@ -1418,6 +1942,30 @@ def run_pipeline(
                     receptor,
                 )
             ]
+
+        receptor_structure_validations = (
+            _run_receptor_conformer_validations(
+                receptor_conformers=(
+                    receptor_conformers
+                ),
+                output_dir=output_dir,
+                chain_id=receptor_chain_id,
+                submitted_validation=(
+                    receptor_structure_validation
+                ),
+            )
+        )
+
+        if len(
+            receptor_structure_validations
+        ) > 1:
+            print(
+                "[RAMACHANDRAN] Completed "
+                "conformer-specific validation "
+                f"for {len(
+                    receptor_structure_validations
+                )} receptor conformers."
+            )
 
         # Detect geometric pockets on the original protein coordinates.
         # The protonated display structure is retained for validation/output,
@@ -2172,133 +2720,148 @@ def run_pipeline(
                         "receptor_conformer_id"
                     )
                     or "submitted_receptor"
-                )
+                ).strip()
                 for row in pocket_selection_rows
-                if row.get("selected")
+                if (
+                    row.get("selected")
+                    and str(
+                        row.get(
+                            "receptor_conformer_id"
+                        )
+                        or "submitted_receptor"
+                    ).strip()
+                )
             }
 
-            validation_report = (
-                receptor_structure_validation.get(
-                    "report",
-                    {},
-                )
-            )
-
-            if not isinstance(
-                validation_report,
-                dict,
-            ):
-                validation_report = {}
-
-            validation_outputs = (
-                receptor_structure_validation.get(
-                    "outputs",
-                    {},
-                )
-            )
-
-            if not isinstance(
-                validation_outputs,
-                dict,
-            ):
-                validation_outputs = {}
-
-            ramachandran_json = (
-                validation_outputs.get("json")
-            )
-
-            if (
-                validation_report.get("status")
-                != "complete"
-            ):
-                print(
-                    "[STRUCTURE-POCKET QUALITY] "
-                    "Skipped because submitted-"
-                    "receptor Ramachandran "
-                    "validation was not complete."
-                )
-
-            elif not ramachandran_json:
-                print(
-                    "[STRUCTURE-POCKET QUALITY] "
-                    "Skipped because the "
-                    "Ramachandran JSON path was "
-                    "not available."
-                )
-
-            elif not selected_conformer_ids:
-                print(
-                    "[STRUCTURE-POCKET QUALITY] "
-                    "Skipped because no selected "
-                    "receptor conformer was "
-                    "recorded."
-                )
-
-            elif not selected_conformer_ids.issubset(
-                {"submitted_receptor"}
-            ):
-                print(
-                    "[STRUCTURE-POCKET QUALITY] "
-                    "Skipped because selected "
-                    "MD/ensemble conformers require "
-                    "conformer-specific structural "
-                    "validation: "
-                    + ", ".join(
-                        sorted(
+            try:
+                quality_result = (
+                    _run_selected_conformer_structure_pocket_quality(
+                        selected_conformer_ids=(
                             selected_conformer_ids
-                        )
+                        ),
+                        receptor_conformers=(
+                            receptor_conformers
+                        ),
+                        receptor_structure_validations=(
+                            receptor_structure_validations
+                        ),
+                        pocket_definitions_path=(
+                            pocket_definitions_path
+                        ),
+                        pocket_selection_summary_path=(
+                            selection_json
+                        ),
+                        output_dir=output_dir,
                     )
                 )
 
-            else:
-                try:
-                    quality_result = (
-                        run_structure_pocket_quality(
-                            structure_path=Path(
-                                receptor_pdb
-                            ),
-                            ramachandran_report_path=Path(
-                                ramachandran_json
-                            ),
-                            pocket_definitions_path=(
-                                pocket_definitions_path
-                            ),
-                            pocket_selection_summary_path=(
-                                selection_json
-                            ),
-                            output_dir=output_dir,
+                quality_report = (
+                    quality_result["report"]
+                )
+
+                print(
+                    "[STRUCTURE-POCKET QUALITY] "
+                    f"Status="
+                    f"{quality_report.get('status')}; "
+                    f"selected_conformers="
+                    f"{quality_report.get(
+                        'selected_conformer_count'
+                    )}; "
+                    f"completed="
+                    f"{quality_report.get(
+                        'completed_conformer_count'
+                    )}; "
+                    f"overall_verdict="
+                    f"{quality_report.get(
+                        'overall_verdict'
+                    )}"
+                )
+
+                quality_records = (
+                    quality_report.get(
+                        "conformers",
+                        [],
+                    )
+                )
+
+                if not isinstance(
+                    quality_records,
+                    list,
+                ):
+                    quality_records = []
+
+                for quality_record in (
+                    quality_records
+                ):
+                    if not isinstance(
+                        quality_record,
+                        dict,
+                    ):
+                        continue
+
+                    conformer_id = (
+                        quality_record.get(
+                            "receptor_conformer_id",
+                            "unknown",
+                        )
+                    )
+                    record_status = (
+                        quality_record.get(
+                            "status",
+                            "unknown",
                         )
                     )
 
-                    quality_report = (
-                        quality_result["report"]
-                    )
+                    if record_status == "complete":
+                        print(
+                            "[STRUCTURE-POCKET QUALITY] "
+                            f"{conformer_id}: "
+                            f"verdict="
+                            f"{quality_record.get(
+                                'verdict'
+                            )}; "
+                            f"global_outliers="
+                            f"{quality_record.get(
+                                'outlier_count'
+                            )}; "
+                            f"selected_box_local="
+                            f"{quality_record.get(
+                                'selected_box_local_'
+                                'outlier_count'
+                            )}"
+                        )
+                        print(
+                            "[STRUCTURE-POCKET QUALITY] "
+                            f"{conformer_id} report: "
+                            f"{quality_record.get(
+                                'report_path'
+                            )}"
+                        )
+                    else:
+                        print(
+                            "[STRUCTURE-POCKET QUALITY] "
+                            f"{conformer_id}: "
+                            f"status={record_status}; "
+                            f"reason="
+                            f"{quality_record.get(
+                                'reason',
+                                'not recorded',
+                            )}"
+                        )
 
-                    print(
-                        "[STRUCTURE-POCKET QUALITY] "
-                        f"Verdict="
-                        f"{quality_report['verdict']}; "
-                        f"global_outliers="
-                        f"{quality_report['outlier_count']}; "
-                        f"selected_box_local="
-                        f"{len(quality_report[
-                            'selected_box_local_outliers'
-                        ])}"
-                    )
+                print(
+                    "[STRUCTURE-POCKET QUALITY] "
+                    "Aggregate report: "
+                    f"{quality_result['output_path']}"
+                )
 
-                    print(
-                        "[STRUCTURE-POCKET QUALITY] "
-                        "Report: "
-                        f"{quality_result['output_path']}"
-                    )
-
-                except Exception as error:
-                    print(
-                        "[STRUCTURE-POCKET QUALITY] "
-                        "Failed nonfatally: "
-                        f"{type(error).__name__}: "
-                        f"{error}"
-                    )
+            except Exception as error:
+                print(
+                    "[STRUCTURE-POCKET QUALITY] "
+                    "Failed nonfatally: "
+                    f"{type(error).__name__}: "
+                    f"{error}"
+                )
 
         eligibility_csv, eligibility_json = (
             _write_ligand_eligibility_report(

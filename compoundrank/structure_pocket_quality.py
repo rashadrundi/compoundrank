@@ -231,6 +231,7 @@ def evaluate_structure_pocket_quality(
     ramachandran_report_path: Path,
     pocket_definitions_path: Path,
     pocket_selection_summary_path: Path,
+    receptor_conformer_id: str | None = None,
     near_threshold_angstrom: float = (
         DEFAULT_NEAR_BOX_THRESHOLD_ANGSTROM
     ),
@@ -240,6 +241,29 @@ def evaluate_structure_pocket_quality(
             "near_threshold_angstrom cannot "
             "be negative."
         )
+
+    requested_conformer_id: str | None = None
+
+    if receptor_conformer_id is not None:
+        requested_conformer_id = str(
+            receptor_conformer_id
+        ).strip()
+
+        if not requested_conformer_id:
+            raise ValueError(
+                "receptor_conformer_id cannot "
+                "be empty."
+            )
+
+        if (
+            "/" in requested_conformer_id
+            or "\\" in requested_conformer_id
+        ):
+            raise ValueError(
+                "receptor_conformer_id cannot "
+                "contain path separators: "
+                f"{requested_conformer_id!r}"
+            )
 
     ramachandran = _read_json(
         ramachandran_report_path
@@ -310,6 +334,20 @@ def evaluate_structure_pocket_quality(
         if not selection.get("selected"):
             continue
 
+        selection_conformer_id = str(
+            selection.get(
+                "receptor_conformer_id"
+            )
+            or "submitted_receptor"
+        ).strip()
+
+        if (
+            requested_conformer_id is not None
+            and selection_conformer_id
+            != requested_conformer_id
+        ):
+            continue
+
         pocket_id = str(
             selection["pocket_id"]
         )
@@ -323,6 +361,16 @@ def evaluate_structure_pocket_quality(
     selected_pocket_ids = sorted(
         selected_by_pocket
     )
+
+    if (
+        requested_conformer_id is not None
+        and not selected_pocket_ids
+    ):
+        raise ValueError(
+            "No selected pocket rows were found "
+            "for receptor conformer: "
+            f"{requested_conformer_id}"
+        )
 
     missing_selected_pocket_ids = [
         pocket_id
@@ -591,7 +639,7 @@ def evaluate_structure_pocket_quality(
             "geometry_caution"
         )
 
-    return {
+    report = {
         "schema_version": SCHEMA_VERSION,
         "status": "complete",
         "source_structure": str(
@@ -670,6 +718,13 @@ def evaluate_structure_pocket_quality(
     }
 
 
+    report["receptor_conformer_id"] = (
+        requested_conformer_id
+    )
+
+    return report
+
+
 def write_structure_pocket_quality(
     report: dict[str, Any],
     output_path: Path,
@@ -699,6 +754,7 @@ def run_structure_pocket_quality(
     pocket_definitions_path: Path,
     pocket_selection_summary_path: Path,
     output_dir: Path,
+    receptor_conformer_id: str | None = None,
     near_threshold_angstrom: float = (
         DEFAULT_NEAR_BOX_THRESHOLD_ANGSTROM
     ),
@@ -714,15 +770,30 @@ def run_structure_pocket_quality(
         pocket_selection_summary_path=(
             pocket_selection_summary_path
         ),
+        receptor_conformer_id=(
+            receptor_conformer_id
+        ),
         near_threshold_angstrom=(
             near_threshold_angstrom
         ),
     )
 
-    output_path = (
-        output_dir
-        / "structure_pocket_quality.json"
+    report_conformer_id = report.get(
+        "receptor_conformer_id"
     )
+
+    if report_conformer_id is None:
+        output_path = (
+            output_dir
+            / "structure_pocket_quality.json"
+        )
+    else:
+        output_path = (
+            output_dir
+            / "structure_pocket_quality"
+            / str(report_conformer_id)
+            / "structure_pocket_quality.json"
+        )
 
     write_structure_pocket_quality(
         report,

@@ -1722,7 +1722,7 @@ def _render_structure_validation_section(
     return lines
 
 
-def _render_structure_pocket_quality_section(
+def _render_single_structure_pocket_quality_section(
     output_dir: Path,
 ) -> list[str]:
     report_path = (
@@ -1979,6 +1979,379 @@ def _render_structure_pocket_quality_section(
 
     return lines
 
+
+
+def _render_structure_pocket_quality_section(
+    output_dir: Path,
+) -> list[str]:
+    aggregate_path = (
+        output_dir
+        / "structure_pocket_quality_ensemble.json"
+    )
+
+    try:
+        aggregate = _load_json(
+            aggregate_path
+        )
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ) as error:
+        return [
+            "### Pocket-Localized Structure Quality",
+            "",
+            (
+                "- Status: aggregate report could "
+                "not be read: "
+                f"`{type(error).__name__}`"
+            ),
+            "",
+        ]
+
+    if aggregate is None:
+        return (
+            _render_single_structure_pocket_quality_section(
+                output_dir
+            )
+        )
+
+    if not isinstance(aggregate, dict):
+        return [
+            "### Pocket-Localized Structure Quality",
+            "",
+            (
+                "- Status: aggregate report had an "
+                "invalid top-level format."
+            ),
+            "",
+        ]
+
+    def display_identifier(
+        value: Any,
+    ) -> str:
+        text_value = str(
+            value
+            if value is not None
+            else "unknown"
+        ).replace("_", " ")
+
+        if not text_value:
+            return "Unknown"
+
+        return (
+            text_value[0].upper()
+            + text_value[1:]
+        )
+
+    def string_list(
+        value: Any,
+    ) -> list[str]:
+        if not isinstance(value, list):
+            return []
+
+        return [
+            str(item)
+            for item in value
+        ]
+
+    def table_cell(
+        value: Any,
+    ) -> str:
+        return str(value).replace(
+            "|",
+            r"\|",
+        ).replace(
+            "\n",
+            " ",
+        )
+
+    status_raw = str(
+        aggregate.get(
+            "status",
+            "unknown",
+        )
+    )
+    overall_verdict_raw = str(
+        aggregate.get(
+            "overall_verdict",
+            "unknown",
+        )
+    )
+
+    records = aggregate.get(
+        "conformers",
+        [],
+    )
+
+    if not isinstance(records, list):
+        records = []
+
+    lines = [
+        "### Pocket-Localized Structure Quality",
+        "",
+        (
+            "This assessment evaluates each receptor "
+            "conformer selected by at least one "
+            "compound using that conformer's own "
+            "Ramachandran validation and coordinates."
+        ),
+        "",
+        (
+            "- Status: "
+            f"**{display_identifier(status_raw)}**"
+        ),
+        (
+            "- Overall verdict: "
+            f"**{display_identifier(
+                overall_verdict_raw
+            )}**"
+        ),
+        (
+            "- Selected receptor conformers: "
+            f"{_format_value(
+                aggregate.get(
+                    'selected_conformer_count'
+                )
+            )}"
+        ),
+        (
+            "- Successfully evaluated conformers: "
+            f"{_format_value(
+                aggregate.get(
+                    'completed_conformer_count'
+                )
+            )}"
+        ),
+        (
+            "- Incomplete conformer evaluations: "
+            f"{_format_value(
+                aggregate.get(
+                    'incomplete_conformer_count'
+                )
+            )}"
+        ),
+        (
+            "- Aggregate artifact: "
+            f"`{_relative_or_original(
+                output_dir,
+                aggregate_path,
+            )}`"
+        ),
+        "",
+    ]
+
+    if records:
+        lines += [
+            (
+                "| Receptor conformer | Status | "
+                "Verdict | Selected pockets | "
+                "Global outliers | Local outliers | "
+                "Report or reason |"
+            ),
+            (
+                "|---|---|---|---|---:|---:|---|"
+            ),
+        ]
+
+        for record_value in records:
+            if not isinstance(
+                record_value,
+                dict,
+            ):
+                continue
+
+            conformer_id = str(
+                record_value.get(
+                    "receptor_conformer_id",
+                    "unknown",
+                )
+            )
+            record_status_raw = str(
+                record_value.get(
+                    "status",
+                    "unknown",
+                )
+            )
+
+            if record_status_raw == "complete":
+                verdict_text = display_identifier(
+                    record_value.get(
+                        "verdict",
+                        "unknown",
+                    )
+                )
+            else:
+                verdict_text = "Not evaluated"
+
+            selected_pockets = string_list(
+                record_value.get(
+                    "selected_pocket_ids"
+                )
+            )
+
+            selected_pocket_text = (
+                ", ".join(
+                    f"`{pocket_id}`"
+                    for pocket_id
+                    in selected_pockets
+                )
+                if selected_pockets
+                else "none recorded"
+            )
+
+            local_count = record_value.get(
+                "selected_box_local_outlier_count"
+            )
+
+            if local_count is None:
+                local_count = len(
+                    string_list(
+                        record_value.get(
+                            "selected_box_local_outliers"
+                        )
+                    )
+                )
+
+            report_path_value = (
+                record_value.get(
+                    "report_path"
+                )
+            )
+
+            if report_path_value:
+                detail = (
+                    "`"
+                    + _relative_or_original(
+                        output_dir,
+                        Path(
+                            str(
+                                report_path_value
+                            )
+                        ),
+                    )
+                    + "`"
+                )
+            else:
+                detail = str(
+                    record_value.get(
+                        "reason",
+                        "not recorded",
+                    )
+                )
+
+            lines.append(
+                "| "
+                + table_cell(
+                    f"`{conformer_id}`"
+                )
+                + " | "
+                + table_cell(
+                    display_identifier(
+                        record_status_raw
+                    )
+                )
+                + " | "
+                + table_cell(verdict_text)
+                + " | "
+                + table_cell(
+                    selected_pocket_text
+                )
+                + " | "
+                + table_cell(
+                    _format_value(
+                        record_value.get(
+                            "outlier_count"
+                        )
+                    )
+                )
+                + " | "
+                + table_cell(
+                    _format_value(
+                        local_count
+                    )
+                )
+                + " | "
+                + table_cell(detail)
+                + " |"
+            )
+
+        lines.append("")
+
+    if overall_verdict_raw == "strong":
+        lines.append(
+            "Every selected conformer met the "
+            "configured global Ramachandran goals, "
+            "and no identified outlier was localized "
+            "inside or near its selected docking box."
+        )
+
+    elif (
+        overall_verdict_raw
+        == "usable_with_global_geometry_caution"
+    ):
+        lines.append(
+            "At least one selected conformer did not "
+            "meet the strict global Ramachandran "
+            "goals, but no identified backbone "
+            "outlier was localized inside or near a "
+            "selected docking box."
+        )
+
+    elif (
+        overall_verdict_raw
+        == "manual_review_of_selected_pocket"
+    ):
+        lines.append(
+            "At least one selected conformer has a "
+            "Ramachandran outlier near a selected "
+            "docking box. Review the affected local "
+            "residue environment before relying on "
+            "that docking result."
+        )
+
+    elif (
+        overall_verdict_raw
+        == "selected_pocket_geometry_concern"
+    ):
+        lines.append(
+            "At least one selected conformer has a "
+            "Ramachandran outlier inside a selected "
+            "docking box. Review the affected pocket "
+            "or consider an alternate conformer "
+            "before treating that result as reliable."
+        )
+
+    elif overall_verdict_raw.startswith(
+        "manual_review_"
+    ):
+        lines.append(
+            "One or more selected-conformer quality "
+            "assessments were incomplete or raised a "
+            "structural concern requiring manual "
+            "review."
+        )
+
+    else:
+        lines.append(
+            "Review the conformer-specific quality "
+            "records before interpreting the selected "
+            "docking results."
+        )
+
+    lines += [
+        "",
+        (
+            "_This analysis measures distances to "
+            "padded GNINA docking boxes rather than "
+            "directly to molecular pocket surfaces. "
+            "It does not replace clash, rotamer, "
+            "bond-geometry, density, confidence, or "
+            "dynamics validation._"
+        ),
+        "",
+    ]
+
+    return lines
 
 def render_run_report(
     *,
