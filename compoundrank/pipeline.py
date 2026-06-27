@@ -1012,7 +1012,7 @@ def _run_receptor_conformer_validations(
 
 
 STRUCTURE_POCKET_QUALITY_ENSEMBLE_SCHEMA_VERSION = (
-    "structure_pocket_quality_ensemble.v0.1"
+    "structure_pocket_quality_ensemble.v0.2"
 )
 
 
@@ -1049,6 +1049,7 @@ def _run_selected_conformer_structure_pocket_quality(
     ],
     pocket_definitions_path: Path,
     pocket_selection_summary_path: Path,
+    pose_recovery_summary_path: Path | None = None,
     output_dir: Path,
     quality_runner=run_structure_pocket_quality,
 ) -> dict[str, Any]:
@@ -1206,6 +1207,9 @@ def _run_selected_conformer_structure_pocket_quality(
                 pocket_selection_summary_path=(
                     pocket_selection_summary_path
                 ),
+                pose_recovery_summary_path=(
+                    pose_recovery_summary_path
+                ),
                 output_dir=output_dir,
                 receptor_conformer_id=(
                     conformer_id
@@ -1226,18 +1230,42 @@ def _run_selected_conformer_structure_pocket_quality(
                     "runner returned no report."
                 )
 
-            local_outliers = (
+            box_local_outliers = (
                 quality_report.get(
                     "selected_box_local_outliers",
                     [],
                 )
             )
+            pose_local_outliers = (
+                quality_report.get(
+                    "selected_pose_local_outliers",
+                    [],
+                )
+            )
+            box_edge_only_outliers = (
+                quality_report.get(
+                    "box_edge_only_outliers",
+                    [],
+                )
+            )
 
             if not isinstance(
-                local_outliers,
+                box_local_outliers,
                 list,
             ):
-                local_outliers = []
+                box_local_outliers = []
+
+            if not isinstance(
+                pose_local_outliers,
+                list,
+            ):
+                pose_local_outliers = []
+
+            if not isinstance(
+                box_edge_only_outliers,
+                list,
+            ):
+                box_edge_only_outliers = []
 
             record = {
                 "receptor_conformer_id": (
@@ -1262,10 +1290,33 @@ def _run_selected_conformer_structure_pocket_quality(
                     )
                 ),
                 "selected_box_local_outliers": (
-                    local_outliers
+                    box_local_outliers
                 ),
                 "selected_box_local_outlier_count": (
-                    len(local_outliers)
+                    len(box_local_outliers)
+                ),
+                "selected_pose_local_outliers": (
+                    pose_local_outliers
+                ),
+                "selected_pose_local_outlier_count": (
+                    len(pose_local_outliers)
+                ),
+                "box_edge_only_outliers": (
+                    box_edge_only_outliers
+                ),
+                "box_edge_only_outlier_count": (
+                    len(box_edge_only_outliers)
+                ),
+                "selected_pose_available": (
+                    quality_report.get(
+                        "selected_pose_available",
+                        False,
+                    )
+                ),
+                "selected_pose_context": (
+                    quality_report.get(
+                        "selected_pose_context"
+                    )
                 ),
                 "verdict": quality_report.get(
                     "verdict",
@@ -1392,6 +1443,12 @@ def _run_selected_conformer_structure_pocket_quality(
         "pocket_selection_summary": str(
             pocket_selection_summary_path
         ),
+        "pose_recovery_summary": (
+            str(pose_recovery_summary_path)
+            if pose_recovery_summary_path
+            is not None
+            else None
+        ),
         "conformers": records,
         "limitations": [
             (
@@ -1405,10 +1462,16 @@ def _run_selected_conformer_structure_pocket_quality(
                 "verdict."
             ),
             (
-                "Distances are measured to padded "
-                "GNINA docking boxes rather than "
-                "directly to molecular pocket "
-                "surfaces."
+                "Raw box-localization distances are "
+                "measured to padded GNINA docking "
+                "boxes rather than directly to "
+                "molecular pocket surfaces."
+            ),
+            (
+                "When a persisted selected pose is "
+                "available, verdict localization is "
+                "refined using residue-to-pose "
+                "heavy-atom distances."
             ),
         ],
     }
@@ -2751,6 +2814,17 @@ def run_pipeline(
                         pocket_selection_summary_path=(
                             selection_json
                         ),
+                        pose_recovery_summary_path=(
+                            (
+                                output_dir
+                                / "pose_set_recovery_summary.json"
+                            )
+                            if (
+                                output_dir
+                                / "pose_set_recovery_summary.json"
+                            ).is_file()
+                            else None
+                        ),
                         output_dir=output_dir,
                     )
                 )
@@ -2827,6 +2901,16 @@ def run_pipeline(
                             f"selected_box_local="
                             f"{quality_record.get(
                                 'selected_box_local_'
+                                'outlier_count'
+                            )}; "
+                            f"selected_pose_local="
+                            f"{quality_record.get(
+                                'selected_pose_local_'
+                                'outlier_count'
+                            )}; "
+                            f"box_edge_only="
+                            f"{quality_record.get(
+                                'box_edge_only_'
                                 'outlier_count'
                             )}"
                         )

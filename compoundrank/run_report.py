@@ -2145,11 +2145,12 @@ def _render_structure_pocket_quality_section(
             (
                 "| Receptor conformer | Status | "
                 "Verdict | Selected pockets | "
-                "Global outliers | Local outliers | "
+                "Global outliers | Box-local | "
+                "Pose-local | Box-edge only | "
                 "Report or reason |"
             ),
             (
-                "|---|---|---|---|---:|---:|---|"
+                "|---|---|---|---|---:|---:|---:|---:|---|"
             ),
         ]
 
@@ -2199,15 +2200,41 @@ def _render_structure_pocket_quality_section(
                 else "none recorded"
             )
 
-            local_count = record_value.get(
+            box_local_count = record_value.get(
                 "selected_box_local_outlier_count"
             )
 
-            if local_count is None:
-                local_count = len(
+            if box_local_count is None:
+                box_local_count = len(
                     string_list(
                         record_value.get(
                             "selected_box_local_outliers"
+                        )
+                    )
+                )
+
+            pose_local_count = record_value.get(
+                "selected_pose_local_outlier_count"
+            )
+
+            if pose_local_count is None:
+                pose_local_count = len(
+                    string_list(
+                        record_value.get(
+                            "selected_pose_local_outliers"
+                        )
+                    )
+                )
+
+            box_edge_only_count = record_value.get(
+                "box_edge_only_outlier_count"
+            )
+
+            if box_edge_only_count is None:
+                box_edge_only_count = len(
+                    string_list(
+                        record_value.get(
+                            "box_edge_only_outliers"
                         )
                     )
                 )
@@ -2267,7 +2294,19 @@ def _render_structure_pocket_quality_section(
                 + " | "
                 + table_cell(
                     _format_value(
-                        local_count
+                        box_local_count
+                    )
+                )
+                + " | "
+                + table_cell(
+                    _format_value(
+                        pose_local_count
+                    )
+                )
+                + " | "
+                + table_cell(
+                    _format_value(
+                        box_edge_only_count
                     )
                 )
                 + " | "
@@ -2293,8 +2332,11 @@ def _render_structure_pocket_quality_section(
             "At least one selected conformer did not "
             "meet the strict global Ramachandran "
             "goals, but no identified backbone "
-            "outlier was localized inside or near a "
-            "selected docking box."
+            "outlier triggered a selected-pose-local "
+            "geometry concern. Box-local-only "
+            "advisories may still be present because "
+            "docking boxes contain padded search "
+            "volume."
         )
 
     elif (

@@ -8,10 +8,13 @@ from pathlib import Path
 from typing import Any
 
 import gemmi
+from rdkit import Chem
 
 
-SCHEMA_VERSION = "structure_pocket_quality.v0.1"
+SCHEMA_VERSION = "structure_pocket_quality.v0.2"
 DEFAULT_NEAR_BOX_THRESHOLD_ANGSTROM = 4.0
+DEFAULT_DIRECT_POSE_THRESHOLD_ANGSTROM = 4.0
+DEFAULT_NEAR_POSE_THRESHOLD_ANGSTROM = 6.0
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -225,6 +228,288 @@ def _classify_box_distance(
     return "distal_from_docking_box"
 
 
+
+def _minimum_coordinate_distance(
+    first_coordinates: list[
+        tuple[float, float, float]
+    ],
+    second_coordinates: list[
+        tuple[float, float, float]
+    ],
+) -> float:
+    if (
+        not first_coordinates
+        or not second_coordinates
+    ):
+        raise ValueError(
+            "Both coordinate sets must contain "
+            "at least one point."
+        )
+
+    return min(
+        math.dist(first, second)
+        for first in first_coordinates
+        for second in second_coordinates
+    )
+
+
+def _classify_pose_distance(
+    distance_angstrom: float,
+    *,
+    direct_threshold_angstrom: float,
+    near_threshold_angstrom: float,
+    box_local: bool,
+) -> str:
+    if (
+        distance_angstrom
+        <= direct_threshold_angstrom
+    ):
+        return "direct_selected_pose_contact"
+
+    if (
+        distance_angstrom
+        <= near_threshold_angstrom
+    ):
+        return "near_selected_pose"
+
+    if box_local:
+        return "box_edge_only"
+
+    return "distal_from_selected_pose"
+
+
+def _load_selected_pose_context(
+    *,
+    pose_recovery_summary_path: Path | None,
+    receptor_conformer_id: str | None,
+    selected_pocket_ids: list[str],
+) -> tuple[
+    dict[str, Any],
+    list[tuple[float, float, float]],
+]:
+    context: dict[str, Any] = {
+        "status": "not_requested",
+        "summary_path": (
+            str(pose_recovery_summary_path)
+            if pose_recovery_summary_path
+            is not None
+            else None
+        ),
+        "poses_sdf": None,
+        "pose_index": None,
+        "receptor_conformer_id": None,
+        "pocket_id": None,
+        "seed": None,
+        "source_pose_number": None,
+        "error": None,
+    }
+
+    if pose_recovery_summary_path is None:
+        return context, []
+
+    summary_path = Path(
+        pose_recovery_summary_path
+    )
+    context["summary_path"] = str(
+        summary_path
+    )
+
+    try:
+        summary = _read_json(
+            summary_path
+        )
+
+        if len(selected_pocket_ids) != 1:
+            raise ValueError(
+                "Selected-pose refinement currently "
+                "requires exactly one selected pocket "
+                "for the evaluated conformer."
+            )
+
+        top_pose = summary.get(
+            "top_cnn_pose"
+        )
+
+        if not isinstance(top_pose, dict):
+            raise TypeError(
+                "Pose-recovery summary did not "
+                "contain a top_cnn_pose object."
+            )
+
+        expected_conformer_id = (
+            receptor_conformer_id
+            or "submitted_receptor"
+        )
+        actual_conformer_id = str(
+            top_pose.get(
+                "receptor_conformer_id"
+            )
+            or "submitted_receptor"
+        ).strip()
+
+        if (
+            actual_conformer_id
+            != expected_conformer_id
+        ):
+            raise ValueError(
+                "Top CNN pose belongs to receptor "
+                f"conformer {actual_conformer_id!r}, "
+                "not the conformer being evaluated "
+                f"{expected_conformer_id!r}."
+            )
+
+        pocket_id = str(
+            top_pose.get(
+                "pocket_id",
+                "",
+            )
+        ).strip()
+
+        if pocket_id not in selected_pocket_ids:
+            raise ValueError(
+                "Top CNN pose pocket does not match "
+                "the selected pocket for this "
+                f"conformer: {pocket_id!r}."
+            )
+
+        pose_index = int(
+            top_pose.get("pose_index")
+        )
+
+        if pose_index < 1:
+            raise ValueError(
+                "Pose index must be one-based and "
+                "greater than zero."
+            )
+
+        poses_sdf_value = summary.get(
+            "poses_sdf"
+        )
+
+        if not poses_sdf_value:
+            raise ValueError(
+                "Pose-recovery summary did not "
+                "record poses_sdf."
+            )
+
+        poses_sdf_path = Path(
+            str(poses_sdf_value)
+        )
+
+        if not poses_sdf_path.is_absolute():
+            poses_sdf_path = (
+                summary_path.parent
+                / poses_sdf_path
+            )
+
+        if (
+            not poses_sdf_path.is_file()
+            or poses_sdf_path.stat().st_size
+            == 0
+        ):
+            raise FileNotFoundError(
+                poses_sdf_path
+            )
+
+        supplier = Chem.SDMolSupplier(
+            str(poses_sdf_path),
+            removeHs=False,
+            sanitize=False,
+        )
+
+        selected_molecule = None
+
+        for current_index, molecule in enumerate(
+            supplier,
+            start=1,
+        ):
+            if current_index == pose_index:
+                selected_molecule = molecule
+                break
+
+        if selected_molecule is None:
+            raise ValueError(
+                "The selected one-based pose index "
+                f"{pose_index} was not readable from "
+                f"{poses_sdf_path}."
+            )
+
+        if (
+            selected_molecule.GetNumConformers()
+            == 0
+        ):
+            raise ValueError(
+                "Selected pose had no coordinate "
+                "conformer."
+            )
+
+        conformer = (
+            selected_molecule.GetConformer()
+        )
+        coordinates: list[
+            tuple[float, float, float]
+        ] = []
+
+        for atom in (
+            selected_molecule.GetAtoms()
+        ):
+            if atom.GetAtomicNum() == 1:
+                continue
+
+            position = (
+                conformer.GetAtomPosition(
+                    atom.GetIdx()
+                )
+            )
+            coordinates.append(
+                (
+                    float(position.x),
+                    float(position.y),
+                    float(position.z),
+                )
+            )
+
+        if not coordinates:
+            raise ValueError(
+                "Selected pose contained no heavy-"
+                "atom coordinates."
+            )
+
+        context.update(
+            {
+                "status": "complete",
+                "poses_sdf": str(
+                    poses_sdf_path
+                ),
+                "pose_index": pose_index,
+                "receptor_conformer_id": (
+                    actual_conformer_id
+                ),
+                "pocket_id": pocket_id,
+                "seed": top_pose.get("seed"),
+                "source_pose_number": (
+                    top_pose.get(
+                        "source_pose_number"
+                    )
+                ),
+            }
+        )
+
+        return context, coordinates
+
+    except Exception as error:
+        context.update(
+            {
+                "status": "unavailable",
+                "error": (
+                    f"{type(error).__name__}: "
+                    f"{error}"
+                ),
+            }
+        )
+        return context, []
+
+
 def evaluate_structure_pocket_quality(
     *,
     structure_path: Path,
@@ -232,14 +517,39 @@ def evaluate_structure_pocket_quality(
     pocket_definitions_path: Path,
     pocket_selection_summary_path: Path,
     receptor_conformer_id: str | None = None,
+    pose_recovery_summary_path: (
+        Path | None
+    ) = None,
     near_threshold_angstrom: float = (
         DEFAULT_NEAR_BOX_THRESHOLD_ANGSTROM
+    ),
+    direct_pose_threshold_angstrom: float = (
+        DEFAULT_DIRECT_POSE_THRESHOLD_ANGSTROM
+    ),
+    near_pose_threshold_angstrom: float = (
+        DEFAULT_NEAR_POSE_THRESHOLD_ANGSTROM
     ),
 ) -> dict[str, Any]:
     if near_threshold_angstrom < 0:
         raise ValueError(
             "near_threshold_angstrom cannot "
             "be negative."
+        )
+
+    if direct_pose_threshold_angstrom < 0:
+        raise ValueError(
+            "direct_pose_threshold_angstrom "
+            "cannot be negative."
+        )
+
+    if (
+        near_pose_threshold_angstrom
+        < direct_pose_threshold_angstrom
+    ):
+        raise ValueError(
+            "near_pose_threshold_angstrom must "
+            "be greater than or equal to "
+            "direct_pose_threshold_angstrom."
         )
 
     requested_conformer_id: str | None = None
@@ -379,6 +689,25 @@ def evaluate_structure_pocket_quality(
         if pocket_id not in pockets
     ]
 
+    (
+        selected_pose_context,
+        selected_pose_coordinates,
+    ) = _load_selected_pose_context(
+        pose_recovery_summary_path=(
+            pose_recovery_summary_path
+        ),
+        receptor_conformer_id=(
+            requested_conformer_id
+        ),
+        selected_pocket_ids=(
+            selected_pocket_ids
+        ),
+    )
+    selected_pose_available = (
+        selected_pose_context.get("status")
+        == "complete"
+    )
+
     outlier_results: list[
         dict[str, Any]
     ] = []
@@ -386,6 +715,11 @@ def evaluate_structure_pocket_quality(
     unresolved_outliers: list[str] = []
     inside_selected_box: list[str] = []
     near_selected_box: list[str] = []
+    direct_selected_pose_contact: list[
+        str
+    ] = []
+    near_selected_pose: list[str] = []
+    box_edge_only: list[str] = []
 
     for outlier in outliers:
         residue_label = str(
@@ -553,6 +887,72 @@ def evaluate_structure_pocket_quality(
         else:
             nearest_selected = None
 
+        minimum_pose_distance: (
+            float | None
+        ) = None
+        selected_pose_localization = (
+            "not_evaluated"
+        )
+
+        if (
+            selected_pose_available
+            and coordinates
+        ):
+            minimum_pose_distance = (
+                _minimum_coordinate_distance(
+                    coordinates,
+                    selected_pose_coordinates,
+                )
+            )
+
+            nearest_box_local = bool(
+                nearest_selected
+                and nearest_selected.get(
+                    "localization"
+                )
+                in {
+                    "inside_docking_box",
+                    "near_docking_box",
+                }
+            )
+
+            selected_pose_localization = (
+                _classify_pose_distance(
+                    minimum_pose_distance,
+                    direct_threshold_angstrom=(
+                        direct_pose_threshold_angstrom
+                    ),
+                    near_threshold_angstrom=(
+                        near_pose_threshold_angstrom
+                    ),
+                    box_local=nearest_box_local,
+                )
+            )
+
+            if (
+                selected_pose_localization
+                == "direct_selected_pose_contact"
+            ):
+                direct_selected_pose_contact.append(
+                    residue_label
+                )
+
+            elif (
+                selected_pose_localization
+                == "near_selected_pose"
+            ):
+                near_selected_pose.append(
+                    residue_label
+                )
+
+            elif (
+                selected_pose_localization
+                == "box_edge_only"
+            ):
+                box_edge_only.append(
+                    residue_label
+                )
+
         outlier_results.append(
             {
                 "residue": residue_label,
@@ -574,6 +974,13 @@ def evaluate_structure_pocket_quality(
                 ),
                 "nearest_selected_pocket": (
                     nearest_selected
+                ),
+                (
+                    "minimum_distance_to_"
+                    "selected_pose_angstrom"
+                ): minimum_pose_distance,
+                "selected_pose_localization": (
+                    selected_pose_localization
                 ),
                 "pockets": pocket_results,
             }
@@ -618,6 +1025,28 @@ def evaluate_structure_pocket_quality(
             "outlier_residues"
         )
 
+    elif selected_pose_available:
+        if direct_selected_pose_contact:
+            verdict = (
+                "selected_pocket_geometry_"
+                "concern"
+            )
+
+        elif near_selected_pose:
+            verdict = (
+                "manual_review_of_"
+                "selected_pocket"
+            )
+
+        elif global_goals_met:
+            verdict = "strong"
+
+        else:
+            verdict = (
+                "usable_with_global_"
+                "geometry_caution"
+            )
+
     elif inside_selected_box:
         verdict = (
             "selected_pocket_geometry_"
@@ -659,15 +1088,24 @@ def evaluate_structure_pocket_quality(
             near_threshold_angstrom
         ),
         "interpretation_scope": (
-            "Distances are measured to padded "
-            "GNINA docking boxes, not directly "
-            "to the molecular pocket surface."
+            "Raw localization is measured against "
+            "padded GNINA docking boxes. When a "
+            "persisted selected-pose artifact is "
+            "available, verdict localization is "
+            "refined using direct residue-to-pose "
+            "heavy-atom distances."
         ),
         "limitations": [
             (
                 "A docking box includes empty "
                 "search volume and is broader "
                 "than the physical pocket."
+            ),
+            (
+                "Selected-pose distances describe "
+                "proximity to one docked pose and "
+                "do not prove a functional residue "
+                "interaction."
             ),
             (
                 "Distal Ramachandran outliers "
@@ -713,6 +1151,42 @@ def evaluate_structure_pocket_quality(
         "selected_box_local_outliers": (
             selected_box_local_outliers
         ),
+        "selected_pose_context": (
+            selected_pose_context
+        ),
+        "selected_pose_available": (
+            selected_pose_available
+        ),
+        "direct_pose_threshold_angstrom": (
+            direct_pose_threshold_angstrom
+        ),
+        "near_pose_threshold_angstrom": (
+            near_pose_threshold_angstrom
+        ),
+        (
+            "direct_selected_pose_"
+            "contact_outliers"
+        ): sorted(
+            set(
+                direct_selected_pose_contact
+            )
+        ),
+        "near_selected_pose_outliers": (
+            sorted(
+                set(near_selected_pose)
+            )
+        ),
+        "selected_pose_local_outliers": (
+            sorted(
+                set(
+                    direct_selected_pose_contact
+                    + near_selected_pose
+                )
+            )
+        ),
+        "box_edge_only_outliers": (
+            sorted(set(box_edge_only))
+        ),
         "verdict": verdict,
         "outliers": outlier_results,
     }
@@ -755,8 +1229,17 @@ def run_structure_pocket_quality(
     pocket_selection_summary_path: Path,
     output_dir: Path,
     receptor_conformer_id: str | None = None,
+    pose_recovery_summary_path: (
+        Path | None
+    ) = None,
     near_threshold_angstrom: float = (
         DEFAULT_NEAR_BOX_THRESHOLD_ANGSTROM
+    ),
+    direct_pose_threshold_angstrom: float = (
+        DEFAULT_DIRECT_POSE_THRESHOLD_ANGSTROM
+    ),
+    near_pose_threshold_angstrom: float = (
+        DEFAULT_NEAR_POSE_THRESHOLD_ANGSTROM
     ),
 ) -> dict[str, Any]:
     report = evaluate_structure_pocket_quality(
@@ -773,8 +1256,17 @@ def run_structure_pocket_quality(
         receptor_conformer_id=(
             receptor_conformer_id
         ),
+        pose_recovery_summary_path=(
+            pose_recovery_summary_path
+        ),
         near_threshold_angstrom=(
             near_threshold_angstrom
+        ),
+        direct_pose_threshold_angstrom=(
+            direct_pose_threshold_angstrom
+        ),
+        near_pose_threshold_angstrom=(
+            near_pose_threshold_angstrom
         ),
     )
 

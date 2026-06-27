@@ -94,7 +94,14 @@ class PipelineConformerStructurePocketQualityTests(
                     f"{conformer_id}_pocket"
                 ],
                 "outlier_count": 2,
-                "selected_box_local_outliers": [],
+                "selected_box_local_outliers": [
+                    "ALA:A:1"
+                ],
+                "selected_pose_local_outliers": [],
+                "box_edge_only_outliers": [
+                    "ALA:A:1"
+                ],
+                "selected_pose_available": True,
                 "verdict": verdicts[
                     conformer_id
                 ],
@@ -126,6 +133,15 @@ class PipelineConformerStructurePocketQualityTests(
         self,
     ) -> None:
         calls: list[dict] = []
+
+        pose_summary = (
+            self.root
+            / "pose_set_recovery_summary.json"
+        )
+        pose_summary.write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
 
         result = (
             _run_selected_conformer_structure_pocket_quality(
@@ -175,6 +191,9 @@ class PipelineConformerStructurePocketQualityTests(
                 pocket_selection_summary_path=(
                     self.selection
                 ),
+                pose_recovery_summary_path=(
+                    pose_summary
+                ),
                 output_dir=self.root / "output",
                 quality_runner=self._fake_runner(
                     calls,
@@ -205,8 +224,37 @@ class PipelineConformerStructurePocketQualityTests(
             "snapshot_0002.pdb",
         )
         self.assertEqual(
+            calls[0][
+                "pose_recovery_summary_path"
+            ],
+            pose_summary,
+        )
+        self.assertEqual(
             result["report"][
                 "selected_conformer_count"
+            ],
+            1,
+        )
+
+        conformer_record = (
+            result["report"]["conformers"][0]
+        )
+
+        self.assertEqual(
+            conformer_record[
+                "selected_box_local_outlier_count"
+            ],
+            1,
+        )
+        self.assertEqual(
+            conformer_record[
+                "selected_pose_local_outlier_count"
+            ],
+            0,
+        )
+        self.assertEqual(
+            conformer_record[
+                "box_edge_only_outlier_count"
             ],
             1,
         )

@@ -5,6 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from rdkit import Chem
+from rdkit.Geometry import Point3D
+
 from compoundrank.structure_pocket_quality import (
     evaluate_structure_pocket_quality,
     run_structure_pocket_quality,
@@ -163,12 +166,76 @@ class StructurePocketQualityTests(
             },
         )
 
+
+    def _write_pose_recovery_summary(
+        self,
+        *,
+        pose_x: float,
+    ) -> Path:
+        poses_path = (
+            self.root
+            / "selected_poses.sdf"
+        )
+
+        molecule = Chem.MolFromSmiles("C")
+
+        if molecule is None:
+            raise RuntimeError(
+                "Could not build test molecule."
+            )
+
+        conformer = Chem.Conformer(
+            molecule.GetNumAtoms()
+        )
+        conformer.SetAtomPosition(
+            0,
+            Point3D(
+                float(pose_x),
+                0.0,
+                0.0,
+            ),
+        )
+        molecule.AddConformer(
+            conformer,
+            assignId=True,
+        )
+
+        writer = Chem.SDWriter(
+            str(poses_path)
+        )
+
+        try:
+            writer.write(molecule)
+        finally:
+            writer.close()
+
+        return self._write_json(
+            "pose_set_recovery_summary.json",
+            {
+                "poses_sdf": str(
+                    poses_path
+                ),
+                "top_cnn_pose": {
+                    "pose_index": 1,
+                    "receptor_conformer_id": (
+                        "submitted_receptor"
+                    ),
+                    "pocket_id": (
+                        "fpocket_01_pocket_1"
+                    ),
+                    "seed": 123,
+                    "source_pose_number": 1,
+                },
+            },
+        )
+
     def _evaluate(
         self,
         *,
         receptor_x: float,
         include_outlier: bool = True,
         goals_met: bool = False,
+        pose_x: float | None = None,
     ) -> dict:
         return evaluate_structure_pocket_quality(
             structure_path=(
@@ -189,6 +256,13 @@ class StructurePocketQualityTests(
             ),
             pocket_selection_summary_path=(
                 self._write_selection_summary()
+            ),
+            pose_recovery_summary_path=(
+                self._write_pose_recovery_summary(
+                    pose_x=pose_x
+                )
+                if pose_x is not None
+                else None
             ),
         )
 
@@ -265,6 +339,158 @@ class StructurePocketQualityTests(
                 "minimum_distance_to_box_angstrom"
             ],
             2.0,
+            places=6,
+        )
+
+
+    def test_near_box_remote_from_pose_is_box_edge_only(
+        self,
+    ) -> None:
+        report = self._evaluate(
+            receptor_x=12.0,
+            pose_x=0.0,
+        )
+
+        self.assertEqual(
+            report["verdict"],
+            (
+                "usable_with_global_"
+                "geometry_caution"
+            ),
+        )
+        self.assertEqual(
+            report[
+                "near_selected_box_outliers"
+            ],
+            ["ALA:A:1"],
+        )
+        self.assertEqual(
+            report[
+                "selected_box_local_outliers"
+            ],
+            ["ALA:A:1"],
+        )
+        self.assertEqual(
+            report[
+                "selected_pose_local_outliers"
+            ],
+            [],
+        )
+        self.assertEqual(
+            report[
+                "box_edge_only_outliers"
+            ],
+            ["ALA:A:1"],
+        )
+
+        outlier = report["outliers"][0]
+
+        self.assertEqual(
+            outlier[
+                "selected_pose_localization"
+            ],
+            "box_edge_only",
+        )
+        self.assertAlmostEqual(
+            outlier[
+                "minimum_distance_to_"
+                "selected_pose_angstrom"
+            ],
+            12.0,
+            places=6,
+        )
+
+    def test_direct_pose_contact_is_geometry_concern(
+        self,
+    ) -> None:
+        report = self._evaluate(
+            receptor_x=12.0,
+            pose_x=12.5,
+        )
+
+        self.assertEqual(
+            report["verdict"],
+            (
+                "selected_pocket_geometry_"
+                "concern"
+            ),
+        )
+        self.assertEqual(
+            report[
+                "direct_selected_pose_"
+                "contact_outliers"
+            ],
+            ["ALA:A:1"],
+        )
+        self.assertEqual(
+            report[
+                "selected_pose_local_outliers"
+            ],
+            ["ALA:A:1"],
+        )
+        self.assertEqual(
+            report[
+                "box_edge_only_outliers"
+            ],
+            [],
+        )
+
+        outlier = report["outliers"][0]
+
+        self.assertEqual(
+            outlier[
+                "selected_pose_localization"
+            ],
+            "direct_selected_pose_contact",
+        )
+        self.assertAlmostEqual(
+            outlier[
+                "minimum_distance_to_"
+                "selected_pose_angstrom"
+            ],
+            0.5,
+            places=6,
+        )
+
+    def test_near_pose_requires_manual_review(
+        self,
+    ) -> None:
+        report = self._evaluate(
+            receptor_x=12.0,
+            pose_x=17.0,
+        )
+
+        self.assertEqual(
+            report["verdict"],
+            "manual_review_of_selected_pocket",
+        )
+        self.assertEqual(
+            report[
+                "near_selected_pose_outliers"
+            ],
+            ["ALA:A:1"],
+        )
+        self.assertEqual(
+            report[
+                "selected_pose_local_outliers"
+            ],
+            ["ALA:A:1"],
+        )
+
+        outlier = report["outliers"][0]
+
+        self.assertEqual(
+            outlier[
+                "selected_pose_localization"
+            ],
+            "near_selected_pose",
+        )
+        self.assertAlmostEqual(
+            outlier[
+                "minimum_distance_to_"
+                "selected_pose_angstrom"
+            ],
+            5.0,
             places=6,
         )
 
@@ -379,7 +605,7 @@ class StructurePocketQualityTests(
 
         self.assertEqual(
             saved_report["schema_version"],
-            "structure_pocket_quality.v0.1",
+            "structure_pocket_quality.v0.2",
         )
         self.assertEqual(
             saved_report["verdict"],

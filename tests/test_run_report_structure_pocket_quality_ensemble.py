@@ -68,7 +68,7 @@ class RunReportStructurePocketQualityEnsembleTests(
             {
                 "schema_version": (
                     "structure_pocket_quality_"
-                    "ensemble.v0.1"
+                    "ensemble.v0.2"
                 ),
                 "status": "complete",
                 "selected_conformer_count": 1,
@@ -88,8 +88,17 @@ class RunReportStructurePocketQualityEnsembleTests(
                             "autobox_01"
                         ],
                         "outlier_count": 5,
-                        "selected_box_local_outliers": [],
-                        "selected_box_local_outlier_count": 0,
+                        "selected_box_local_outliers": [
+                            "HIS:B:296"
+                        ],
+                        "selected_box_local_outlier_count": 1,
+                        "selected_pose_local_outliers": [],
+                        "selected_pose_local_outlier_count": 0,
+                        "box_edge_only_outliers": [
+                            "HIS:B:296"
+                        ],
+                        "box_edge_only_outlier_count": 1,
+                        "selected_pose_available": True,
                         "verdict": (
                             "usable_with_global_"
                             "geometry_caution"
@@ -118,7 +127,37 @@ class RunReportStructurePocketQualityEnsembleTests(
             rendered,
         )
         self.assertIn(
-            "| 5 | 0 |",
+            (
+                "| Global outliers | Box-local | "
+                "Pose-local | Box-edge only |"
+            ),
+            rendered,
+        )
+        self.assertIn(
+            "| 5 | 1 | 0 | 1 |",
+            rendered,
+        )
+        self.assertIn(
+            (
+                "no identified backbone outlier "
+                "triggered a selected-pose-local "
+                "geometry concern"
+            ),
+            rendered,
+        )
+        self.assertIn(
+            (
+                "Box-local-only advisories may still "
+                "be present"
+            ),
+            rendered,
+        )
+        self.assertNotIn(
+            (
+                "no identified backbone outlier was "
+                "localized inside or near a selected "
+                "docking box"
+            ),
             rendered,
         )
         self.assertIn(
