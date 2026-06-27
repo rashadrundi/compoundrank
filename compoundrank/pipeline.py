@@ -52,6 +52,9 @@ from .pose_recovery import (
     write_scored_pose_outputs,
 )
 from .ramachandran import run_ramachandran_validation
+from .structure_pocket_quality import (
+    run_structure_pocket_quality,
+)
 from .receptor import prepare_receptor
 from .receptor_conformer_preparation import (
     prepare_receptor_conformers,
@@ -1023,6 +1026,7 @@ def run_pipeline(
 
         for filename in (
             "pocket_biological_evidence.json",
+            "structure_pocket_quality.json",
             "pose_recovery_selected_pocket_poses.sdf",
             "pose_set_recovery_summary.json",
             "pose_set_recovery_metrics.csv",
@@ -1038,17 +1042,19 @@ def run_pipeline(
         aligned_receptor_ensemble_json,
     )
 
-    _run_structure_validation(
-        structure_path=Path(
-            receptor_pdb
-        ),
-        output_dir=(
-            output_dir
-            / "structure_validation"
-            / "receptor"
-        ),
-        chain_id=receptor_chain_id,
-        label="submitted receptor",
+    receptor_structure_validation = (
+        _run_structure_validation(
+            structure_path=Path(
+                receptor_pdb
+            ),
+            output_dir=(
+                output_dir
+                / "structure_validation"
+                / "receptor"
+            ),
+            chain_id=receptor_chain_id,
+            label="submitted receptor",
+        )
     )
 
     if receptor_ensemble_json is not None:
@@ -2158,6 +2164,141 @@ def run_pipeline(
                 "[REPORT] Pocket selection JSON: "
                 f"{selection_json}"
             )
+
+        if pocket_selection_paths is not None:
+            selected_conformer_ids = {
+                str(
+                    row.get(
+                        "receptor_conformer_id"
+                    )
+                    or "submitted_receptor"
+                )
+                for row in pocket_selection_rows
+                if row.get("selected")
+            }
+
+            validation_report = (
+                receptor_structure_validation.get(
+                    "report",
+                    {},
+                )
+            )
+
+            if not isinstance(
+                validation_report,
+                dict,
+            ):
+                validation_report = {}
+
+            validation_outputs = (
+                receptor_structure_validation.get(
+                    "outputs",
+                    {},
+                )
+            )
+
+            if not isinstance(
+                validation_outputs,
+                dict,
+            ):
+                validation_outputs = {}
+
+            ramachandran_json = (
+                validation_outputs.get("json")
+            )
+
+            if (
+                validation_report.get("status")
+                != "complete"
+            ):
+                print(
+                    "[STRUCTURE-POCKET QUALITY] "
+                    "Skipped because submitted-"
+                    "receptor Ramachandran "
+                    "validation was not complete."
+                )
+
+            elif not ramachandran_json:
+                print(
+                    "[STRUCTURE-POCKET QUALITY] "
+                    "Skipped because the "
+                    "Ramachandran JSON path was "
+                    "not available."
+                )
+
+            elif not selected_conformer_ids:
+                print(
+                    "[STRUCTURE-POCKET QUALITY] "
+                    "Skipped because no selected "
+                    "receptor conformer was "
+                    "recorded."
+                )
+
+            elif not selected_conformer_ids.issubset(
+                {"submitted_receptor"}
+            ):
+                print(
+                    "[STRUCTURE-POCKET QUALITY] "
+                    "Skipped because selected "
+                    "MD/ensemble conformers require "
+                    "conformer-specific structural "
+                    "validation: "
+                    + ", ".join(
+                        sorted(
+                            selected_conformer_ids
+                        )
+                    )
+                )
+
+            else:
+                try:
+                    quality_result = (
+                        run_structure_pocket_quality(
+                            structure_path=Path(
+                                receptor_pdb
+                            ),
+                            ramachandran_report_path=Path(
+                                ramachandran_json
+                            ),
+                            pocket_definitions_path=(
+                                pocket_definitions_path
+                            ),
+                            pocket_selection_summary_path=(
+                                selection_json
+                            ),
+                            output_dir=output_dir,
+                        )
+                    )
+
+                    quality_report = (
+                        quality_result["report"]
+                    )
+
+                    print(
+                        "[STRUCTURE-POCKET QUALITY] "
+                        f"Verdict="
+                        f"{quality_report['verdict']}; "
+                        f"global_outliers="
+                        f"{quality_report['outlier_count']}; "
+                        f"selected_box_local="
+                        f"{len(quality_report[
+                            'selected_box_local_outliers'
+                        ])}"
+                    )
+
+                    print(
+                        "[STRUCTURE-POCKET QUALITY] "
+                        "Report: "
+                        f"{quality_result['output_path']}"
+                    )
+
+                except Exception as error:
+                    print(
+                        "[STRUCTURE-POCKET QUALITY] "
+                        "Failed nonfatally: "
+                        f"{type(error).__name__}: "
+                        f"{error}"
+                    )
 
         eligibility_csv, eligibility_json = (
             _write_ligand_eligibility_report(
