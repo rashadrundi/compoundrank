@@ -20,3 +20,5 @@ __pycache__/
 *.a3m
 *.done.txt
 *_out/
+
+*.egg-info/

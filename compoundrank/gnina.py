@@ -34,13 +34,43 @@ def run_gnina_seed(
     exhaustiveness: int = 32,
     num_modes: int = 20,
     cnn_scoring: str = "refinement",
+    min_rmsd_filter: float = 0.5,
+    pose_sort_order: str = "CNNscore",
     autobox_add: float = 4.0,
     gnina_bin: str = "gnina",
     cpu: int | None = None,
     device: int | None = None,
+    timeout_seconds: int | None = None,
+    receptor_conformer_id: str = "submitted_receptor",
 ) -> list[PoseRecord]:
     gnina = resolve_executable(gnina_bin, "GNINA")
-    seed_dir = work_dir / ligand.name / f"seed_{seed}"
+
+    conformer_id = receptor_conformer_id.strip()
+
+    if not conformer_id:
+        raise ValueError(
+            "receptor_conformer_id cannot be empty"
+        )
+
+    if any(
+        separator in conformer_id
+        for separator in (
+            "/",
+            "\\",
+        )
+    ):
+        raise ValueError(
+            "receptor_conformer_id cannot contain "
+            "path separators"
+        )
+
+    seed_dir = (
+        work_dir
+        / conformer_id
+        / ligand.name
+        / pocket.pocket_id
+        / f"seed_{seed}"
+    )
     seed_dir.mkdir(parents=True, exist_ok=True)
     output_sdf = seed_dir / "poses.sdf"
 
@@ -55,19 +85,29 @@ def run_gnina_seed(
         str(exhaustiveness),
         "--num_modes",
         str(num_modes),
-        "--seed",
-        str(seed),
+        "--min_rmsd_filter",
+        str(min_rmsd_filter),
         "--cnn_scoring",
         cnn_scoring,
+        "--pose_sort_order",
+        pose_sort_order,
+        "--seed",
+        str(seed),
         "--out",
         str(output_sdf),
     ]
+
     if cpu is not None:
         command += ["--cpu", str(cpu)]
+
     if device is not None:
         command += ["--device", str(device)]
 
-    completed = run_command(command)
+    completed = run_command(
+        command,
+        timeout_seconds=timeout_seconds,
+    )
+
     if completed.stdout:
         print(completed.stdout, end="")
     if completed.stderr:
@@ -77,6 +117,7 @@ def run_gnina_seed(
         raise RuntimeError(f"GNINA did not create poses for {ligand.name}")
 
     raw_poses = load_sdf_records(output_sdf, sanitize=False)
+
     if not raw_poses:
         raise RuntimeError(f"GNINA pose SDF was unreadable: {output_sdf}")
 
@@ -85,15 +126,28 @@ def run_gnina_seed(
     pose_to_source = choose_pose_to_source_mapping(pairs, source, raw_poses[0])
 
     records: list[PoseRecord] = []
+
     for pose_number, raw_pose in enumerate(raw_poses, start=1):
         reconstructed = reconstruct_heavy_pose(source, raw_pose, pose_to_source)
-        reconstructed.SetProp("_Name", f"{ligand.name}_seed_{seed}_pose_{pose_number}")
+
+        reconstructed.SetProp(
+            "_Name",
+            f"{ligand.name}_{pocket.pocket_id}_seed_{seed}_pose_{pose_number}",
+        )
+
         for property_name in ("CNNscore", "CNNaffinity", "minimizedAffinity"):
             value = _float_property(raw_pose, property_name)
             if value is not None:
                 reconstructed.SetDoubleProp(property_name, value)
+
         reconstructed.SetIntProp("seed", seed)
         reconstructed.SetIntProp("pose_number", pose_number)
+        reconstructed.SetProp("pocket_id", pocket.pocket_id)
+        reconstructed.SetProp(
+            "receptor_conformer_id",
+            conformer_id,
+        )
+
         records.append(
             PoseRecord(
                 ligand_name=ligand.name,
@@ -104,8 +158,20 @@ def run_gnina_seed(
                 cnn_affinity=_float_property(raw_pose, "CNNaffinity"),
                 minimized_affinity=_float_property(raw_pose, "minimizedAffinity"),
                 source_sdf=output_sdf,
+                pocket_id=pocket.pocket_id,
+                pocket_rank=pocket.pocket_rank,
+                pocket_source=pocket.source or pocket.mode,
+                fpocket_score=pocket.fpocket_score,
+                receptor_conformer_id=conformer_id,
+                receptor_source_pdb=(
+                    receptor.source_pdb
+                ),
+                receptor_display_pdb=(
+                    receptor.display_pdb
+                ),
             )
         )
+
     return records
 
 
@@ -118,8 +184,9 @@ def run_gnina_ensemble(
     **kwargs: object,
 ) -> list[PoseRecord]:
     records: list[PoseRecord] = []
+
     for seed in seeds:
-        print(f"\n[GNINA] {ligand.name}: seed {seed}")
+        print(f"\n[GNINA] {ligand.name}: {pocket.pocket_id}; seed {seed}")
         records.extend(
             run_gnina_seed(
                 receptor,
@@ -130,4 +197,5 @@ def run_gnina_ensemble(
                 **kwargs,
             )
         )
+
     return records

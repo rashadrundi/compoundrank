@@ -61,6 +61,100 @@ def _run_meeko_receptor(
     )
 
 
+
+def _pdb_atom_element(
+    line: str,
+) -> str:
+    """Return a PDB atom element conservatively."""
+
+    if len(line) >= 78:
+        explicit = (
+            line[76:78]
+            .strip()
+            .upper()
+        )
+
+        if explicit:
+            return explicit
+
+    atom_name = (
+        line[12:16].strip()
+        if len(line) >= 16
+        else ""
+    )
+
+    for character in atom_name:
+        if character.isalpha():
+            return character.upper()
+
+    return ""
+
+
+def _write_pdb2pqr_input(
+    source_pdb: Path,
+    destination_pdb: Path,
+) -> int:
+    """Write a heavy-atom PDB for PDB2PQR.
+
+    MD/OpenMM outputs already contain explicit
+    hydrogens. PDB2PQR must regenerate those
+    hydrogens itself so protonation and debumping
+    are internally consistent.
+    """
+
+    source = Path(source_pdb)
+    destination = Path(
+        destination_pdb
+    )
+
+    lines = source.read_text(
+        encoding="utf-8",
+        errors="replace",
+    ).splitlines()
+
+    retained: list[str] = []
+    removed_hydrogens = 0
+    retained_atom_count = 0
+
+    for line in lines:
+        if line.startswith(
+            (
+                "ATOM  ",
+                "HETATM",
+            )
+        ):
+            if _pdb_atom_element(
+                line
+            ) in {
+                "H",
+                "D",
+            }:
+                removed_hydrogens += 1
+                continue
+
+            retained_atom_count += 1
+
+        retained.append(line)
+
+    if retained_atom_count == 0:
+        raise ValueError(
+            "Receptor contains no heavy atoms "
+            f"after hydrogen removal: {source}"
+        )
+
+    destination.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    destination.write_text(
+        "\n".join(retained) + "\n",
+        encoding="utf-8",
+    )
+
+    return removed_hydrogens
+
+
 def prepare_receptor(
     source_pdb: Path,
     cache_root: Path,
@@ -69,7 +163,11 @@ def prepare_receptor(
     pdb2pqr_bin: str = "pdb2pqr",
     meeko_receptor_bin: str = "mk_prepare_receptor.py",
 ) -> PreparedReceptor:
-    cache_key = content_cache_key(source_pdb, f"ph={ph}", "receptor-v3")
+    cache_key = content_cache_key(
+        source_pdb,
+        f"ph={ph}",
+        "receptor-v4-heavy-input",
+    )
     cache_dir = cache_root / "receptors" / cache_key
     prepared_pdbqt = cache_dir / "receptor_prepared.pdbqt"
     protonated_pdb = cache_dir / "receptor_protonated.pdb"
@@ -84,8 +182,35 @@ def prepare_receptor(
         )
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    copied_source = cache_dir / "receptor_source.pdb"
-    shutil.copy2(source_pdb, copied_source)
+    copied_source = (
+        cache_dir
+        / "receptor_source.pdb"
+    )
+
+    shutil.copy2(
+        source_pdb,
+        copied_source,
+    )
+
+    pdb2pqr_input = (
+        cache_dir
+        / "receptor_pdb2pqr_input.pdb"
+    )
+
+    removed_hydrogens = (
+        _write_pdb2pqr_input(
+            copied_source,
+            pdb2pqr_input,
+        )
+    )
+
+    if removed_hydrogens:
+        print(
+            "[RECEPTOR PREPARATION] "
+            f"Removed {removed_hydrogens} "
+            "pre-existing hydrogen/deuterium "
+            "atoms before PDB2PQR"
+        )
 
     pdb2pqr = resolve_executable(pdb2pqr_bin, "PDB2PQR")
     meeko = resolve_executable(meeko_receptor_bin, "Meeko receptor preparation")
@@ -99,7 +224,7 @@ def prepare_receptor(
             f"--with-ph={ph}",
             "--pdb-output",
             str(protonated_pdb),
-            str(copied_source),
+            str(pdb2pqr_input),
             str(pqr_path),
         ]
     )

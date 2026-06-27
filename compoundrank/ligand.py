@@ -6,14 +6,44 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, Descriptors, Lipinski
 
 from .models import PreparedLigand
 from .paths import content_cache_key, sanitize_name
 from .subprocess_utils import resolve_executable, run_command
+
+
+# These limits define eligibility for the standard small-molecule GNINA
+# workflow. They are intentionally permissive enough to retain many
+# macrocycles and larger drug-like molecules while excluding proteins,
+# large peptides, and pathological structures.
+MAX_STANDARD_MOLECULAR_WEIGHT = 1500.0
+MAX_STANDARD_HEAVY_ATOMS = 110
+MAX_STANDARD_ROTATABLE_BONDS = 45
+MAX_STANDARD_ABS_FORMAL_CHARGE = 6
+
+# A molecule with this many amide bonds and this molecular weight is likely
+# to be a peptide or biologic rather than a conventional docking ligand.
+PEPTIDE_LIKE_MIN_AMIDE_BONDS = 12
+PEPTIDE_LIKE_MIN_MOLECULAR_WEIGHT = 900.0
+
+_AMIDE_PATTERN = Chem.MolFromSmarts("[CX3](=[OX1])[NX3]")
+
+
+class LigandEligibilityError(ValueError):
+    """Raised when a structure is unsuitable for standard ligand docking."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        assessment: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.assessment = assessment or {}
 
 
 @dataclass(frozen=True)
@@ -27,72 +57,348 @@ def _download_pubchem_sdf(cid: str, destination: Path) -> str:
     urls = [
         (
             "3d",
-            f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/SDF?record_type=3d",
+            (
+                "https://pubchem.ncbi.nlm.nih.gov/rest/pug/"
+                f"compound/cid/{cid}/SDF?record_type=3d"
+            ),
         ),
         (
             "2d",
-            f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/SDF?record_type=2d",
+            (
+                "https://pubchem.ncbi.nlm.nih.gov/rest/pug/"
+                f"compound/cid/{cid}/SDF?record_type=2d"
+            ),
         ),
     ]
+
     errors: list[str] = []
+
     for label, url in urls:
         try:
             request = urllib.request.Request(
                 url,
                 headers={"User-Agent": "compoundrank-local/0.2"},
             )
-            with urllib.request.urlopen(request, timeout=60) as response:
+
+            with urllib.request.urlopen(
+                request,
+                timeout=60,
+            ) as response:
                 data = response.read()
+
             if data:
                 destination.write_bytes(data)
                 return label
+
         except (urllib.error.URLError, TimeoutError) as error:
             errors.append(f"{label}: {error}")
+
     raise RuntimeError(
-        f"Could not retrieve PubChem CID {cid}. Attempts: {'; '.join(errors)}"
+        f"Could not retrieve PubChem CID {cid}. "
+        f"Attempts: {'; '.join(errors)}"
     )
 
 
 def _sdf_has_3d_coordinates(path: Path) -> bool:
-    supplier = Chem.SDMolSupplier(str(path), removeHs=False, sanitize=False)
-    molecule = next((mol for mol in supplier if mol is not None), None)
+    supplier = Chem.SDMolSupplier(
+        str(path),
+        removeHs=False,
+        sanitize=False,
+    )
+    molecule = next(
+        (mol for mol in supplier if mol is not None),
+        None,
+    )
+
     if molecule is None or molecule.GetNumConformers() == 0:
         return False
+
     conformer = molecule.GetConformer()
+
     return any(
         abs(conformer.GetAtomPosition(index).z) > 1e-3
         for index in range(molecule.GetNumAtoms())
     )
 
 
-def _write_smiles_3d(smiles: str, destination: Path, seed: int = 2026) -> None:
+def _read_first_valid_sdf_molecule(path: Path) -> Chem.Mol:
+    """Read and sanitize the first valid molecular record in an SDF."""
+
+    supplier = Chem.SDMolSupplier(
+        str(path),
+        removeHs=False,
+        sanitize=True,
+    )
+
+    for molecule in supplier:
+        if molecule is not None:
+            return molecule
+
+    raise LigandEligibilityError(
+        f"RDKit could not parse a valid sanitized molecule from {path}",
+        assessment={
+            "eligible": False,
+            "eligibility_status": "excluded_invalid_structure",
+            "eligibility_reasons": [
+                "RDKit could not parse and sanitize the supplied structure."
+            ],
+            "recommended_workflow": "structure_repair_or_manual_review",
+        },
+    )
+
+
+def _principal_fragment(molecule: Chem.Mol) -> Chem.Mol:
+    """Select the largest organic fragment for eligibility assessment."""
+
+    try:
+        fragments = list(
+            Chem.GetMolFrags(
+                molecule,
+                asMols=True,
+                sanitizeFrags=True,
+            )
+        )
+    except Exception as exc:
+        raise LigandEligibilityError(
+            f"Could not separate molecular fragments: {exc}",
+            assessment={
+                "eligible": False,
+                "eligibility_status": "excluded_invalid_structure",
+                "eligibility_reasons": [
+                    "The molecular fragments could not be sanitized."
+                ],
+                "recommended_workflow": "structure_repair_or_manual_review",
+            },
+        ) from exc
+
+    if not fragments:
+        raise LigandEligibilityError(
+            "No molecular fragments were present.",
+            assessment={
+                "eligible": False,
+                "eligibility_status": "excluded_invalid_structure",
+                "eligibility_reasons": [
+                    "The structure contained no usable molecular fragments."
+                ],
+                "recommended_workflow": "structure_repair_or_manual_review",
+            },
+        )
+
+    def fragment_rank(fragment: Chem.Mol) -> tuple[int, int, int, float]:
+        carbon_atoms = sum(
+            atom.GetAtomicNum() == 6
+            for atom in fragment.GetAtoms()
+        )
+
+        return (
+            1 if carbon_atoms > 0 else 0,
+            fragment.GetNumHeavyAtoms(),
+            carbon_atoms,
+            float(Descriptors.MolWt(fragment)),
+        )
+
+    selected = max(fragments, key=fragment_rank)
+    Chem.SanitizeMol(selected)
+
+    return selected
+
+
+def assess_ligand_molecule(molecule: Chem.Mol) -> dict[str, Any]:
+    """Assess suitability for the standard small-molecule docking workflow."""
+
+    selected = _principal_fragment(molecule)
+
+    molecular_weight = float(Descriptors.MolWt(selected))
+    heavy_atoms = int(selected.GetNumHeavyAtoms())
+    rotatable_bonds = int(Lipinski.NumRotatableBonds(selected))
+    formal_charge = int(Chem.GetFormalCharge(selected))
+    fragment_count = len(Chem.GetMolFrags(molecule))
+
+    amide_bonds = (
+        len(selected.GetSubstructMatches(_AMIDE_PATTERN))
+        if _AMIDE_PATTERN is not None
+        else 0
+    )
+
+    peptide_or_biologic_like = (
+        amide_bonds >= PEPTIDE_LIKE_MIN_AMIDE_BONDS
+        and molecular_weight >= PEPTIDE_LIKE_MIN_MOLECULAR_WEIGHT
+    )
+
+    reasons: list[str] = []
+
+    if peptide_or_biologic_like:
+        reasons.append(
+            "The structure is peptide/biologic-like based on its amide-bond "
+            "count and molecular weight."
+        )
+
+    if molecular_weight > MAX_STANDARD_MOLECULAR_WEIGHT:
+        reasons.append(
+            f"Molecular weight {molecular_weight:.1f} Da exceeds the "
+            f"standard-docking limit of "
+            f"{MAX_STANDARD_MOLECULAR_WEIGHT:.1f} Da."
+        )
+
+    if heavy_atoms > MAX_STANDARD_HEAVY_ATOMS:
+        reasons.append(
+            f"Heavy-atom count {heavy_atoms} exceeds the standard-docking "
+            f"limit of {MAX_STANDARD_HEAVY_ATOMS}."
+        )
+
+    if rotatable_bonds > MAX_STANDARD_ROTATABLE_BONDS:
+        reasons.append(
+            f"Rotatable-bond count {rotatable_bonds} exceeds the "
+            f"standard-docking limit of "
+            f"{MAX_STANDARD_ROTATABLE_BONDS}."
+        )
+
+    if abs(formal_charge) > MAX_STANDARD_ABS_FORMAL_CHARGE:
+        reasons.append(
+            f"Absolute formal charge {abs(formal_charge)} exceeds the "
+            f"standard-docking limit of "
+            f"{MAX_STANDARD_ABS_FORMAL_CHARGE}."
+        )
+
+    if peptide_or_biologic_like:
+        status = "excluded_protein_or_biologic"
+        recommended_workflow = "peptide_or_biologic_workflow"
+    elif (
+        molecular_weight > MAX_STANDARD_MOLECULAR_WEIGHT
+        or heavy_atoms > MAX_STANDARD_HEAVY_ATOMS
+    ):
+        status = "excluded_oversized"
+        recommended_workflow = "large_molecule_manual_review"
+    elif rotatable_bonds > MAX_STANDARD_ROTATABLE_BONDS:
+        status = "excluded_excessive_flexibility"
+        recommended_workflow = "specialized_flexible_ligand_workflow"
+    elif abs(formal_charge) > MAX_STANDARD_ABS_FORMAL_CHARGE:
+        status = "excluded_extreme_charge"
+        recommended_workflow = "protonation_and_charge_manual_review"
+    else:
+        status = "eligible_standard_small_molecule"
+        recommended_workflow = "standard_gnina_docking"
+
+    return {
+        "eligible": not reasons,
+        "eligibility_status": status,
+        "eligibility_reasons": reasons,
+        "recommended_workflow": recommended_workflow,
+        "molecular_weight": round(molecular_weight, 3),
+        "heavy_atom_count": heavy_atoms,
+        "rotatable_bond_count": rotatable_bonds,
+        "formal_charge": formal_charge,
+        "amide_bond_count": amide_bonds,
+        "fragment_count": fragment_count,
+        "principal_fragment_atoms": selected.GetNumAtoms(),
+        "principal_fragment_heavy_atoms": selected.GetNumHeavyAtoms(),
+    }
+
+
+def assess_ligand_file(path: Path) -> dict[str, Any]:
+    """Assess the first valid molecular record in a ligand SDF."""
+
+    path = Path(path).expanduser().resolve()
+
+    if not path.is_file():
+        raise FileNotFoundError(f"Ligand file does not exist: {path}")
+
+    molecule = _read_first_valid_sdf_molecule(path)
+    assessment = assess_ligand_molecule(molecule)
+    assessment["input_path"] = str(path)
+
+    return assessment
+
+
+def _enforce_standard_docking_eligibility(path: Path) -> dict[str, Any]:
+    assessment = assess_ligand_file(path)
+
+    print(
+        "[LIGAND ELIGIBILITY] "
+        f"{path.name}: "
+        f"{assessment['eligibility_status']} | "
+        f"MW={assessment['molecular_weight']} | "
+        f"heavy_atoms={assessment['heavy_atom_count']} | "
+        f"rotatable_bonds={assessment['rotatable_bond_count']} | "
+        f"amide_bonds={assessment['amide_bond_count']} | "
+        f"formal_charge={assessment['formal_charge']}",
+        flush=True,
+    )
+
+    if not assessment["eligible"]:
+        reason_text = "; ".join(
+            assessment["eligibility_reasons"]
+        )
+
+        raise LigandEligibilityError(
+            (
+                "Ligand is not eligible for the standard small-molecule "
+                f"docking workflow: {reason_text}"
+            ),
+            assessment=assessment,
+        )
+
+    return assessment
+
+
+def _write_smiles_3d(
+    smiles: str,
+    destination: Path,
+    seed: int = 2026,
+) -> None:
     molecule = Chem.MolFromSmiles(smiles)
+
     if molecule is None:
         raise ValueError(f"Invalid SMILES: {smiles}")
+
     molecule = Chem.AddHs(molecule)
+
     parameters = AllChem.ETKDGv3()
     parameters.randomSeed = seed
     parameters.enforceChirality = True
+
     if AllChem.EmbedMolecule(molecule, parameters) != 0:
-        raise RuntimeError("RDKit could not generate a 3D ligand conformer")
+        raise RuntimeError(
+            "RDKit could not generate a 3D ligand conformer"
+        )
+
     if AllChem.MMFFHasAllMoleculeParams(molecule):
-        AllChem.MMFFOptimizeMolecule(molecule, maxIters=2000)
+        AllChem.MMFFOptimizeMolecule(
+            molecule,
+            maxIters=2000,
+        )
     elif AllChem.UFFHasAllMoleculeParams(molecule):
-        AllChem.UFFOptimizeMolecule(molecule, maxIters=2000)
+        AllChem.UFFOptimizeMolecule(
+            molecule,
+            maxIters=2000,
+        )
+
     writer = Chem.SDWriter(str(destination))
-    writer.write(molecule)
-    writer.close()
+
+    try:
+        writer.write(molecule)
+    finally:
+        writer.close()
 
 
 def read_manifest(path: Path) -> list[LigandRequest]:
     requests: list[LigandRequest] = []
-    with path.open(newline="", encoding="utf-8") as handle:
+
+    with path.open(
+        newline="",
+        encoding="utf-8",
+    ) as handle:
         reader = csv.DictReader(handle)
         required = {"name", "source_type", "value"}
-        if not reader.fieldnames or not required <= set(reader.fieldnames):
+
+        if not reader.fieldnames or not required <= set(
+            reader.fieldnames
+        ):
             raise ValueError(
-                "Ligand manifest requires columns: name,source_type,value"
+                "Ligand manifest requires columns: "
+                "name,source_type,value"
             )
+
         for row in reader:
             requests.append(
                 LigandRequest(
@@ -101,6 +407,7 @@ def read_manifest(path: Path) -> list[LigandRequest]:
                     value=row["value"].strip(),
                 )
             )
+
     return requests
 
 
@@ -114,52 +421,104 @@ def prepare_ligand(
 ) -> PreparedLigand:
     name = sanitize_name(request.name)
     source_type = request.source_type.lower()
+
     if source_type not in {"file", "cid", "smiles"}:
-        raise ValueError(f"Unsupported ligand source_type: {source_type}")
+        raise ValueError(
+            f"Unsupported ligand source_type: {source_type}"
+        )
 
     if source_type == "file":
-        source_file = Path(request.value).expanduser().resolve()
+        source_file = Path(
+            request.value
+        ).expanduser().resolve()
+
         if not source_file.is_file():
-            raise FileNotFoundError(f"Ligand file does not exist: {source_file}")
+            raise FileNotFoundError(
+                f"Ligand file does not exist: {source_file}"
+            )
+
         key_part: str | Path = source_file
     else:
         key_part = request.value
 
+    # Incremented so structures cached before the eligibility gate cannot
+    # bypass the new screening logic.
     cache_key = content_cache_key(
         str(source_type),
         key_part,
         f"ph={ph}",
-        "ligand-v2",
+        "ligand-v3-eligibility-gate",
     )
+
     cache_dir = cache_root / "ligands" / cache_key
     normalized_sdf = cache_dir / "ligand_normalized.sdf"
     prepared_pdbqt = cache_dir / "ligand_prepared.pdbqt"
 
     if normalized_sdf.is_file() and prepared_pdbqt.is_file():
+        # Cached structures are still reassessed so future threshold changes
+        # cannot silently reuse an unsuitable ligand.
+        _enforce_standard_docking_eligibility(normalized_sdf)
+
         return PreparedLigand(
             name=name,
-            source_description=f"{source_type}:{request.value}",
+            source_description=(
+                f"{source_type}:{request.value}"
+            ),
             source_sdf=normalized_sdf,
             prepared_pdbqt=prepared_pdbqt,
             cache_key=cache_key,
         )
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     raw_sdf = cache_dir / "ligand_raw.sdf"
 
     if source_type == "file":
-        source_file = Path(request.value).expanduser().resolve()
+        source_file = Path(
+            request.value
+        ).expanduser().resolve()
+
         if source_file.suffix.lower() in {".sdf", ".sd"}:
             shutil.copy2(source_file, raw_sdf)
         else:
-            obabel = resolve_executable(obabel_bin, "Open Babel")
-            run_command([obabel, str(source_file), "-O", str(raw_sdf)])
-    elif source_type == "cid":
-        _download_pubchem_sdf(request.value, raw_sdf)
-    else:
-        _write_smiles_3d(request.value, raw_sdf)
+            obabel = resolve_executable(
+                obabel_bin,
+                "Open Babel",
+            )
+            run_command(
+                [
+                    obabel,
+                    str(source_file),
+                    "-O",
+                    str(raw_sdf),
+                ]
+            )
 
-    obabel = resolve_executable(obabel_bin, "Open Babel")
+    elif source_type == "cid":
+        _download_pubchem_sdf(
+            request.value,
+            raw_sdf,
+        )
+
+    else:
+        _write_smiles_3d(
+            request.value,
+            raw_sdf,
+        )
+
+    # Stop unsuitable structures before protonation, PDBQT conversion, or
+    # docking. This is independent of database metadata and therefore also
+    # protects manual ligand inputs.
+    _enforce_standard_docking_eligibility(raw_sdf)
+
+    obabel = resolve_executable(
+        obabel_bin,
+        "Open Babel",
+    )
+
     command = [
         obabel,
         str(raw_sdf),
@@ -168,11 +527,20 @@ def prepare_ligand(
         "-p",
         str(ph),
     ]
+
     if not _sdf_has_3d_coordinates(raw_sdf):
         command.append("--gen3d")
+
     run_command(command)
 
-    meeko = resolve_executable(meeko_ligand_bin, "Meeko ligand preparation")
+    # Confirm that normalization did not produce a pathological structure.
+    _enforce_standard_docking_eligibility(normalized_sdf)
+
+    meeko = resolve_executable(
+        meeko_ligand_bin,
+        "Meeko ligand preparation",
+    )
+
     run_command(
         [
             meeko,
@@ -186,12 +554,19 @@ def prepare_ligand(
         ]
     )
 
-    if not prepared_pdbqt.is_file() or prepared_pdbqt.stat().st_size == 0:
-        raise RuntimeError("Meeko did not create a ligand PDBQT")
+    if (
+        not prepared_pdbqt.is_file()
+        or prepared_pdbqt.stat().st_size == 0
+    ):
+        raise RuntimeError(
+            "Meeko did not create a ligand PDBQT"
+        )
 
     return PreparedLigand(
         name=name,
-        source_description=f"{source_type}:{request.value}",
+        source_description=(
+            f"{source_type}:{request.value}"
+        ),
         source_sdf=normalized_sdf,
         prepared_pdbqt=prepared_pdbqt,
         cache_key=cache_key,
@@ -205,20 +580,47 @@ def combine_requests(
     manifest_requests: Iterable[LigandRequest],
 ) -> list[LigandRequest]:
     requests = list(manifest_requests)
+
     for value in ligand_files:
         path = Path(value)
-        requests.append(LigandRequest(path.stem, "file", value))
+        requests.append(
+            LigandRequest(
+                path.stem,
+                "file",
+                value,
+            )
+        )
+
     for value in ligand_cids:
-        requests.append(LigandRequest(f"pubchem_{value}", "cid", value))
+        requests.append(
+            LigandRequest(
+                f"pubchem_{value}",
+                "cid",
+                value,
+            )
+        )
+
     for value in ligand_smiles:
         if "=" in value:
             name, smiles = value.split("=", 1)
         else:
-            name, smiles = "smiles_ligand", value
-        requests.append(LigandRequest(name, "smiles", smiles))
+            name, smiles = (
+                "smiles_ligand",
+                value,
+            )
+
+        requests.append(
+            LigandRequest(
+                name,
+                "smiles",
+                smiles,
+            )
+        )
+
     if not requests:
         raise ValueError(
             "Supply at least one --ligand-file, --ligand-cid, "
             "--ligand-smiles, or --ligand-manifest"
         )
+
     return requests

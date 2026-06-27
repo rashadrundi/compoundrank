@@ -16,6 +16,13 @@ class PocketDefinition:
     size_z: float | None = None
     autobox_ligand: Path | None = None
     source: str | None = None
+    pocket_id: str = "pocket_01"
+    pocket_rank: int = 1
+    fpocket_score: float | None = None
+    merged_from: tuple[str, ...] = field(
+        default_factory=tuple
+    )
+    merge_distance: float | None = None
 
     def as_gnina_args(self, autobox_add: float = 4.0) -> list[str]:
         if self.mode == "autobox":
@@ -85,6 +92,13 @@ class PoseRecord:
     cnn_affinity: float | None
     minimized_affinity: float | None
     source_sdf: Path
+    pocket_id: str = "pocket_01"
+    pocket_rank: int = 1
+    pocket_source: str | None = None
+    fpocket_score: float | None = None
+    receptor_conformer_id: str = "submitted_receptor"
+    receptor_source_pdb: Path | None = None
+    receptor_display_pdb: Path | None = None
 
 
 @dataclass
