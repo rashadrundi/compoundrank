@@ -46,6 +46,7 @@ RUN curl -fsSL \
         kalign2=2.04 \
         hhsuite=3.3.0 \
         mmseqs2=18.8cc5c \
+        fpocket \
     && conda clean -afy
 
 # Install GPU-enabled ColabFold.
@@ -53,7 +54,8 @@ RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install \
         "colabfold[alphafold,openmm]==1.6.1" \
         "jax[cuda]<0.8" \
-        "openmm[cuda12]"
+        "openmm[cuda12]" \
+        "posebusters"
 
 # Install the CUDA 12.8 GNINA binary.
 RUN curl -fL \
@@ -79,6 +81,11 @@ RUN python -m pip install . \
     && python -m pip check \
     && command -v compoundrank \
     && command -v colabfold_batch \
-    && command -v gnina
+    && command -v gnina \
+    && command -v fpocket \
+    && command -v pdb2pqr \
+    && command -v mk_prepare_receptor.py \
+    && command -v mk_prepare_ligand.py \
+    && command -v bust
 
 ENTRYPOINT ["/usr/bin/tini", "--", "compoundrank"]
