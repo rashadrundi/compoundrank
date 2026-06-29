@@ -1,6 +1,0 @@
-numpy>=1.26
-scipy>=1.13
-gemmi>=0.7
-rdkit>=2024.3
-meeko>=0.6
-pdb2pqr>=3.6
