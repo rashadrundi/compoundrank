@@ -1404,9 +1404,33 @@ def fetch_candidate_structures(
     )
 
 
-def write_candidate_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _candidate_csv_value(value: Any) -> Any:
+    if value is None:
+        return ""
 
+    if isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, list):
+        if all(
+            isinstance(item, (str, int, float, bool)) or item is None
+            for item in value
+        ):
+            return ";".join(
+                str(item)
+                for item in value
+                if item is not None and str(item) != ""
+            )
+
+        return json.dumps(value, sort_keys=True)
+
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True)
+
+    return str(value)
+
+
+def write_candidate_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
     fields = [
         "compound_name",
         "retrieval_rank",
@@ -1414,6 +1438,7 @@ def write_candidate_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
         "evidence_level",
         "retrieval_route",
         "retrieval_rule_id",
+        "retrieval_rule_label",
         "target_family_basis",
         "target_name",
         "target_class",
@@ -1421,19 +1446,54 @@ def write_candidate_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
         "viral_family",
         "special_domain_label",
         "special_domain_accession",
+        "retrieval_terms",
+        "source_databases",
+        "discovery_source",
+        "discovery_query",
+        "chembl_molecule_id",
+        "chembl_target_id",
+        "chembl_activity_id",
+        "chembl_assay_id",
+        "chembl_document_id",
+        "pchembl_value",
+        "activity_type",
+        "activity_relation",
+        "activity_value",
+        "activity_units",
+        "primary_activity_evidence_category",
+        "potency_evidence_level",
+        "target_transfer_level",
+        "sequence_identity",
+        "sequence_query_coverage",
+        "reference_target_name",
+        "reference_target_organism",
+        "reference_target_type",
+        "target_resolution_route",
+        "target_search_term",
+        "hardcoded_seed",
         "pubchem_cid",
+        "canonical_smiles",
+        "smiles",
+        "structure_source",
         "structure_fetch_status",
+        "structure_fetch_error",
         "local_sdf_path",
         "selected_for_docking",
+        "docking_selection_reason",
         "retrieval_reason",
     ]
 
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        for candidate in candidates:
-            writer.writerow({field: candidate.get(field) for field in fields})
 
+        for candidate in candidates:
+            writer.writerow(
+                {
+                    field: _candidate_csv_value(candidate.get(field))
+                    for field in fields
+                }
+            )
 
 def write_docking_manifest(path: Path, candidates: list[dict[str, Any]]) -> None:
     """Write a ligand manifest compatible with the main CompoundRank pipeline.

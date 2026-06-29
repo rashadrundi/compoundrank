@@ -771,7 +771,7 @@ def _render_ligand_retrieval_section(output_dir: Path) -> list[str]:
                 f"{_table_value(row.get('design_status'))} | "
                 f"{_table_value(row.get('evidence_level'))} | "
                 f"{_table_value(row.get('source_databases'))} | "
-                f"{_table_value(_row_value(row, 'chembl_molecule_chembl_id', 'molecule_chembl_id', 'chembl_id'))} | "
+                f"{_table_value(_row_value(row, 'chembl_molecule_id', 'chembl_molecule_chembl_id', 'molecule_chembl_id', 'chembl_id'))} | "
                 f"{_table_value(row.get('pubchem_cid'))} | "
                 f"{_table_value(_row_value(row, 'structure_fetch_status', 'structure_status'))} |"
             )
