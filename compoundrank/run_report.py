@@ -567,6 +567,7 @@ def _render_ligand_retrieval_section(output_dir: Path) -> list[str]:
     docking_skipped_path = output_dir / "docking_skipped.json"
 
     candidates = _read_candidate_csv(candidate_csv)
+    manifest_rows = _read_candidate_csv(docking_manifest)
     metadata = _load_json(metadata_path) or {}
     query_plan = _load_json(query_plan_path) or {}
     chembl_trace = _load_json(chembl_trace_path) or {}
@@ -638,10 +639,11 @@ def _render_ligand_retrieval_section(output_dir: Path) -> list[str]:
         )
     )
 
-    dockable_count = _first_value(
+    retrieval_selected_count = _first_value(
         metadata.get("dockable_count"),
         selected_count if candidates else None,
     )
+    manifest_ligand_count = len(manifest_rows)
 
     lines = [
         "## Stage 4A Ligand Retrieval",
@@ -675,7 +677,8 @@ def _render_ligand_retrieval_section(output_dir: Path) -> list[str]:
             ),
         ),
         ("Candidate count", _first_value(metadata.get("candidate_count"), len(candidates))),
-        ("Dockable count", dockable_count),
+        ("Retrieval-selected candidate count", retrieval_selected_count),
+        ("Structure-backed manifest ligand rows", manifest_ligand_count),
         ("Local candidate count", metadata.get("local_candidate_count")),
         ("ChEMBL candidate count", metadata.get("chembl_candidate_count")),
         ("ChEMBL target count", metadata.get("chembl_target_count")),
