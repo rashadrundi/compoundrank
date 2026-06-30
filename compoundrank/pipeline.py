@@ -2611,24 +2611,133 @@ def run_pipeline(
                             "located across the receptor ensemble."
                         )
 
-                    pose_summary, pose_outputs = (
-                        _run_selected_pocket_pose_recovery(
-                            reference_ligand=reference_ligand,
-                            records=selected_records,
-                            output_dir=output_dir,
-                            ligand_name=ligand.name,
-                            pocket_id=selected_pocket_id,
-                            rmsd_threshold=(
-                                pose_recovery_rmsd_threshold
-                            ),
-                            selected_receptor_conformer_id=(
-                                selected_receptor_conformer_id
-                            ),
-                            autobox_ligand=(
-                                autobox_ligand
-                            ),
+                    try:
+                        pose_summary, pose_outputs = (
+                            _run_selected_pocket_pose_recovery(
+                                reference_ligand=reference_ligand,
+                                records=selected_records,
+                                output_dir=output_dir,
+                                ligand_name=ligand.name,
+                                pocket_id=selected_pocket_id,
+                                rmsd_threshold=(
+                                    pose_recovery_rmsd_threshold
+                                ),
+                                selected_receptor_conformer_id=(
+                                    selected_receptor_conformer_id
+                                ),
+                                autobox_ligand=(
+                                    autobox_ligand
+                                ),
+                            )
                         )
-                    )
+                    except RuntimeError as error:
+                        selected_compound_value = str(getattr(ligand, 'name', 'unknown'))
+                        selected_conformer_value = str(locals().get('selected_receptor_conformer_id', 'unknown'))
+                        selected_pocket_value = str(locals().get('selected_pocket_id', 'unknown'))
+                        reference_ligand_value = str(locals().get('reference_ligand', 'unknown'))
+                    
+                        pose_recovery_failure = {
+                            'pose_recovery_status': 'failed',
+                            'status': 'failed',
+                            'failure_type': 'runtime_error',
+                            'error': str(error),
+                            'selected_compound': selected_compound_value,
+                            'selected_receptor_conformer': selected_conformer_value,
+                            'selected_pocket_id': selected_pocket_value,
+                            'reference_ligand': reference_ligand_value,
+                            'rmsd_threshold': pose_recovery_rmsd_threshold,
+                            'sampling_pass': False,
+                            'ranking_pass': False,
+        'top_cnn_pose': {
+            'status': 'unavailable',
+            'receptor_conformer_id': selected_conformer_value,
+            'conformer_id': selected_conformer_value,
+            'seed': None,
+            'pose': None,
+            'pose_index': None,
+            'pose_number': None,
+            'rmsd': float('nan'),
+            'rmsd_angstrom': float('nan'),
+            'heavy_atom_rmsd': float('nan'),
+        },
+        'best_sampled_pose': {
+            'status': 'unavailable',
+            'receptor_conformer_id': selected_conformer_value,
+            'conformer_id': selected_conformer_value,
+            'seed': None,
+            'pose': None,
+            'pose_index': None,
+            'pose_number': None,
+            'rmsd': float('nan'),
+            'rmsd_angstrom': float('nan'),
+            'heavy_atom_rmsd': float('nan'),
+        },
+        'top_cnn_pose_rmsd': float('nan'),
+        'best_sampled_rmsd': float('nan'),
+        'best_sampled_pose_rmsd': float('nan'),
+        'evaluated_compound': selected_compound_value,
+        'selected_receptor_conformer_id': selected_conformer_value,
+        'normally_selected_pocket_id': selected_pocket_value,
+        'evaluated_receptor_conformers': [selected_conformer_value],
+                            'interpretation': (
+                                'Pose recovery failed after docking. This commonly means the docked '
+                                'ligand could not be chemically mapped to the reference ligand for '
+                                'RMSD evaluation. Docking results remain available, but cognate '
+                                'redocking metrics should be treated as unavailable for this run.'
+                            ),
+                        }
+                    
+                        pose_recovery_failure_json = output_dir / 'pose_recovery_failure.json'
+                        pose_recovery_failure_json.write_text(
+                            json.dumps(pose_recovery_failure, indent=2) + '\n',
+                            encoding='utf-8',
+                        )
+                    
+                        pose_recovery_failure_md = output_dir / 'pose_recovery_failure_report.md'
+                        pose_recovery_failure_md.write_text(
+                            '\n'.join(
+                                [
+                                    '# Pose Recovery Failure',
+                                    '',
+                                    '- Status: failed',
+                                    '- Failure type: runtime_error',
+                                    f'- Selected compound: `{selected_compound_value}`',
+                                    f'- Selected receptor conformer: `{selected_conformer_value}`',
+                                    f'- Selected pocket: `{selected_pocket_value}`',
+                                    f'- Reference ligand: `{reference_ligand_value}`',
+                                    '',
+                                    '## Error',
+                                    '',
+                                    '```text',
+                                    str(error),
+                                    '```',
+                                    '',
+                                    '## Interpretation',
+                                    '',
+                                    (
+                                        'Pose recovery failed after docking. This commonly happens '
+                                        'when the docked ligand cannot be chemically mapped onto '
+                                        'the reference ligand for RMSD evaluation. The docking run '
+                                        'itself should still be interpreted from the normal docking '
+                                        'report, while pose-recovery metrics should be considered '
+                                        'unavailable.'
+                                    ),
+                                    '',
+                                ]
+                            ),
+                            encoding='utf-8',
+                        )
+                    
+                        pose_summary = pose_recovery_failure
+                        pose_outputs = {
+                            'pose_recovery_failure_json': str(pose_recovery_failure_json),
+                            'pose_recovery_failure_report': str(pose_recovery_failure_md),
+                        }
+                    
+                        print('[POSE_RECOVERY] Status: failed')
+                        print('[POSE_RECOVERY] Failure report:', pose_recovery_failure_md)
+                        print('[POSE_RECOVERY] Failure JSON:', pose_recovery_failure_json)
+                        print('[POSE_RECOVERY] Error:', error)
 
                     print(
                         "\n[POSE_RECOVERY] "
