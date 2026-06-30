@@ -2769,10 +2769,31 @@ def write_run_report(
     )
 
     report_path = output_dir / report_name
+
+
     report_path.write_text(
         report_text,
         encoding="utf-8",
     )
+
+    # POSE_RECOVERY_FAILURE_POSTWRITE_PATCH
+    pose_recovery_failure_section = _render_pose_recovery_failure_section(output_dir)
+    if pose_recovery_failure_section:
+        report_text = report_path.read_text(encoding="utf-8")
+        section_text = "\n".join(pose_recovery_failure_section).rstrip() + "\n\n"
+
+        if "## Pose Recovery Failure" not in report_text:
+            marker = "## Interpretation Limits"
+            if marker in report_text:
+                report_text = report_text.replace(
+                    marker,
+                    section_text + marker,
+                    1,
+                )
+            else:
+                report_text = report_text.rstrip() + "\n\n" + section_text
+
+            report_path.write_text(report_text, encoding="utf-8")
 
     return report_path
 
@@ -2795,6 +2816,86 @@ def main() -> int:
     print(f"Run report: {report_path}")
     return 0
 
+
+
+def _render_pose_recovery_failure_section(output_dir):
+    """Render pose-recovery failure artifacts in the main run report."""
+    output_dir = Path(output_dir)
+    failure_json = output_dir / "pose_recovery_failure.json"
+    failure_report = output_dir / "pose_recovery_failure_report.md"
+
+    if not failure_json.exists() and not failure_report.exists():
+        return []
+
+    data = {}
+    if failure_json.exists():
+        try:
+            data = json.loads(failure_json.read_text(encoding="utf-8"))
+        except Exception as error:
+            data = {
+                "pose_recovery_status": "failed",
+                "failure_type": "json_parse_error",
+                "error": f"Could not parse pose_recovery_failure.json: {error}",
+            }
+
+    def value(key, default="unknown"):
+        raw = data.get(key, default)
+        if raw is None or raw == "":
+            return default
+        return raw
+
+    lines = [
+        "## Pose Recovery Failure",
+        "",
+        "Pose recovery was requested, but RMSD evaluation could not be completed for this run.",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| Status | {value('pose_recovery_status', 'failed')} |",
+        f"| Failure type | {value('failure_type')} |",
+        f"| Selected compound | `{value('selected_compound')}` |",
+        f"| Selected receptor conformer | `{value('selected_receptor_conformer')}` |",
+        f"| Selected pocket | `{value('selected_pocket_id')}` |",
+        f"| Reference ligand | `{value('reference_ligand')}` |",
+        f"| RMSD threshold | {value('rmsd_threshold', 'unavailable')} |",
+        "",
+    ]
+
+    error_text = value("error", "")
+    if error_text:
+        lines.extend(
+            [
+                "### Pose-Recovery Error",
+                "",
+                "```text",
+                str(error_text),
+                "```",
+                "",
+            ]
+        )
+
+    interpretation = value(
+        "interpretation",
+        "Docking results remain available, but pose-recovery RMSD metrics are unavailable for this run.",
+    )
+    lines.extend(
+        [
+            "### Interpretation",
+            "",
+            str(interpretation),
+            "",
+            "### Pose-Recovery Failure Artifacts",
+            "",
+        ]
+    )
+
+    if failure_json.exists():
+        lines.append("- Failure JSON: `pose_recovery_failure.json`")
+    if failure_report.exists():
+        lines.append("- Failure report: `pose_recovery_failure_report.md`")
+
+    lines.append("")
+    return lines
 
 if __name__ == "__main__":
     raise SystemExit(main())
