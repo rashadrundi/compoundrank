@@ -2174,6 +2174,48 @@ def run_pipeline(
 
                 continue
 
+            except RuntimeError as error:
+                assessment = {
+                    "eligibility_status": "preparation_failed",
+                    "eligibility_reasons": [
+                        "Ligand preparation failed before docking."
+                    ],
+                    "recommended_workflow": (
+                        "Review source structure, protonation, charge assignment, "
+                        "or use an alternate ligand structure source."
+                    ),
+                }
+
+                ligand_eligibility_rows.append(
+                    {
+                        "compound": request.name,
+                        "source_type": request.source_type,
+                        "source_value": request.value,
+                        **assessment,
+                        "error": str(error),
+                    }
+                )
+
+                _write_ligand_eligibility_report(
+                    output_dir,
+                    ligand_eligibility_rows,
+                )
+
+                print(
+                    "[LIGAND EXCLUDED] "
+                    f"{request.name}: preparation_failed"
+                )
+                print(
+                    "[LIGAND EXCLUDED] Reason: "
+                    "Ligand preparation failed before docking."
+                )
+                print(
+                    "[LIGAND EXCLUDED] Error: "
+                    f"{error}"
+                )
+
+                continue
+
             assessment = assess_ligand_file(
                 ligand.source_sdf
             )
