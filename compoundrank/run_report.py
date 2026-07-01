@@ -2776,6 +2776,25 @@ def write_run_report(
         encoding="utf-8",
     )
 
+    # PRODUCTION_POSE_RETENTION_POSTWRITE_PATCH
+    production_pose_retention_section = _render_production_pose_retention_section(output_dir)
+    if production_pose_retention_section:
+        report_text = report_path.read_text(encoding="utf-8")
+        section_text = "\n".join(production_pose_retention_section).rstrip() + "\n\n"
+
+        if "## Production-Style Pose Evidence Retention" not in report_text:
+            marker = "## Interpretation Limits"
+            if marker in report_text:
+                report_text = report_text.replace(
+                    marker,
+                    section_text + marker,
+                    1,
+                )
+            else:
+                report_text = report_text.rstrip() + "\n\n" + section_text
+
+            report_path.write_text(report_text, encoding="utf-8")
+
     # ALTERNATIVE_POSE_RETENTION_POSTWRITE_PATCH
     alternative_pose_retention_section = _render_alternative_pose_retention_section(output_dir)
     if alternative_pose_retention_section:
@@ -2952,6 +2971,48 @@ def _render_alternative_pose_retention_section(output_dir):
         lines.append("- Retention report: `alternative_pose_retention_report.md`")
     if retention_csv.exists():
         lines.append("- Retention candidates CSV: `alternative_pose_retention_candidates.csv`")
+
+    lines.append("")
+    return lines
+
+
+
+def _render_production_pose_retention_section(output_dir):
+    """Render production-style pose-retention artifacts in the main run report."""
+    output_dir = Path(output_dir)
+    retention_report = output_dir / "production_pose_retention_report.md"
+    retention_csv = output_dir / "production_pose_retention_candidates.csv"
+
+    if not retention_report.exists() and not retention_csv.exists():
+        return []
+
+    lines = [
+        "## Production-Style Pose Evidence Retention",
+        "",
+        "This section retains alternative docking hypotheses using production-style evidence such as contact recurrence, physical sanity, clustering support, known-residue overlap when available, and near-top CNN score.",
+        "",
+    ]
+
+    if retention_report.exists():
+        report_text = retention_report.read_text(encoding="utf-8")
+        report_lines = report_text.splitlines()
+
+        if report_lines and report_lines[0].startswith("# "):
+            report_lines = report_lines[1:]
+
+        while report_lines and not report_lines[0].strip():
+            report_lines = report_lines[1:]
+
+        lines.extend(report_lines)
+        lines.append("")
+
+    lines.append("### Production Pose-Retention Artifacts")
+    lines.append("")
+
+    if retention_report.exists():
+        lines.append("- Production retention report: `production_pose_retention_report.md`")
+    if retention_csv.exists():
+        lines.append("- Production retention candidates CSV: `production_pose_retention_candidates.csv`")
 
     lines.append("")
     return lines
