@@ -2776,6 +2776,25 @@ def write_run_report(
         encoding="utf-8",
     )
 
+    # PRODUCTION_POSE_RETENTION_ENSEMBLE_POSTWRITE_PATCH
+    production_pose_retention_ensemble_section = _render_production_pose_retention_ensemble_section(output_dir)
+    if production_pose_retention_ensemble_section:
+        report_text = report_path.read_text(encoding="utf-8")
+        section_text = "\n".join(production_pose_retention_ensemble_section).rstrip() + "\n\n"
+
+        if "## Production Pose Retention Ensemble Summary" not in report_text:
+            marker = "## Interpretation Limits"
+            if marker in report_text:
+                report_text = report_text.replace(
+                    marker,
+                    section_text + marker,
+                    1,
+                )
+            else:
+                report_text = report_text.rstrip() + "\n\n" + section_text
+
+            report_path.write_text(report_text, encoding="utf-8")
+
     # PRODUCTION_POSE_RETENTION_POSTWRITE_PATCH
     production_pose_retention_section = _render_production_pose_retention_section(output_dir)
     if production_pose_retention_section:
@@ -3013,6 +3032,48 @@ def _render_production_pose_retention_section(output_dir):
         lines.append("- Production retention report: `production_pose_retention_report.md`")
     if retention_csv.exists():
         lines.append("- Production retention candidates CSV: `production_pose_retention_candidates.csv`")
+
+    lines.append("")
+    return lines
+
+
+
+def _render_production_pose_retention_ensemble_section(output_dir):
+    """Render ensemble-level production pose-retention artifacts in the main run report."""
+    output_dir = Path(output_dir)
+    ensemble_report = output_dir / "production_pose_retention_ensemble_report.md"
+    ensemble_csv = output_dir / "production_pose_retention_ensemble_summary.csv"
+
+    if not ensemble_report.exists() and not ensemble_csv.exists():
+        return []
+
+    lines = [
+        "## Production Pose Retention Ensemble Summary",
+        "",
+        "This section summarizes production-style retained pose evidence across receptor snapshots. It does not use RMSD; it summarizes recurrence, alternative-pose support, evidence-score competition with the primary CNN pose, and physical-warning burden.",
+        "",
+    ]
+
+    if ensemble_report.exists():
+        report_text = ensemble_report.read_text(encoding="utf-8")
+        report_lines = report_text.splitlines()
+
+        if report_lines and report_lines[0].startswith("# "):
+            report_lines = report_lines[1:]
+
+        while report_lines and not report_lines[0].strip():
+            report_lines = report_lines[1:]
+
+        lines.extend(report_lines)
+        lines.append("")
+
+    lines.append("### Ensemble Retention Artifacts")
+    lines.append("")
+
+    if ensemble_report.exists():
+        lines.append("- Ensemble retention report: `production_pose_retention_ensemble_report.md`")
+    if ensemble_csv.exists():
+        lines.append("- Ensemble retention summary CSV: `production_pose_retention_ensemble_summary.csv`")
 
     lines.append("")
     return lines
