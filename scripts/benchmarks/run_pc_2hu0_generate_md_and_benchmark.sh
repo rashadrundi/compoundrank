@@ -1,17 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-###############################################################################
-# PC-only 2HU0 OpenMM MD snapshot generation + EXORCIST benchmark
-#
-# What this does:
-# 1. Runs short/medium OpenMM MD on the 2HU0 chain-B receptor.
-# 2. Writes 10–20 receptor snapshot PDBs.
-# 3. Aligns snapshots back to the original receptor frame.
-# 4. Copies aligned snapshots into BENCH/md_snapshots/.
-# 5. Runs the existing PC MD-ensemble benchmark runner.
-###############################################################################
-
 REPO="/mnt/c/Users/kausr/OneDrive/Desktop/compoundrank"
 DATA="/mnt/c/Users/kausr/OneDrive/Desktop/compoundrank-data"
 BENCH="$DATA/benchmarks/influenza_neuraminidase_2HU0"
@@ -19,6 +8,7 @@ BENCH="$DATA/benchmarks/influenza_neuraminidase_2HU0"
 VENV="$HOME/.venvs/compoundrank-docking/bin/activate"
 
 REFERENCE_RECEPTOR="$BENCH/2HU0_chainB_receptor_clean.pdb"
+PREPARED_OPENMM_RECEPTOR="$BENCH/derived/openmm_md_ensemble_2HU0/prepared/receptor_pdb2pqr.pdb"
 TARGET_SNAPDIR="$BENCH/md_snapshots"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -27,8 +17,6 @@ RAW_SNAPDIR="$RUNROOT/raw_snapshots"
 ALIGNED_SNAPDIR="$RUNROOT/aligned_snapshots"
 LOG="$RUNROOT/openmm_md_generation.log"
 
-# Tune these for longer/shorter PC runs.
-# Good first real run: 20 snapshots across 250 ps production.
 N_SNAPSHOTS="${N_SNAPSHOTS:-20}"
 EQUIL_PS="${EQUIL_PS:-25}"
 PRODUCTION_PS="${PRODUCTION_PS:-250}"
@@ -73,9 +61,22 @@ except Exception as error:
     )
 PY
 
-if [ ! -f "$REFERENCE_RECEPTOR" ]; then
-  echo "ERROR: missing reference receptor:"
-  echo "$REFERENCE_RECEPTOR"
+echo
+echo "=== SELECT OPENMM INPUT RECEPTOR ==="
+
+if [ -f "$PREPARED_OPENMM_RECEPTOR" ]; then
+  OPENMM_INPUT_RECEPTOR="$PREPARED_OPENMM_RECEPTOR"
+  echo "Using prepared OpenMM receptor:"
+  echo "$OPENMM_INPUT_RECEPTOR"
+else
+  OPENMM_INPUT_RECEPTOR="$REFERENCE_RECEPTOR"
+  echo "Prepared OpenMM receptor not found; using cleaned receptor:"
+  echo "$OPENMM_INPUT_RECEPTOR"
+fi
+
+if [ ! -f "$OPENMM_INPUT_RECEPTOR" ]; then
+  echo "ERROR: Missing OpenMM input receptor:"
+  echo "$OPENMM_INPUT_RECEPTOR"
   exit 2
 fi
 
@@ -84,8 +85,6 @@ echo "=== GENERATE RAW OPENMM SNAPSHOTS ==="
 
 python - <<PY
 from pathlib import Path
-import math
-import sys
 
 from openmm import unit
 from openmm import LangevinMiddleIntegrator, Platform
@@ -96,10 +95,9 @@ from openmm.app import (
     Simulation,
     NoCutoff,
     HBonds,
-    PME,
 )
 
-reference_receptor = Path("$REFERENCE_RECEPTOR")
+input_receptor = Path("$OPENMM_INPUT_RECEPTOR")
 raw_snapdir = Path("$RAW_SNAPDIR")
 runroot = Path("$RUNROOT")
 
@@ -111,25 +109,51 @@ temperature_k = float("$TEMPERATURE_K")
 
 raw_snapdir.mkdir(parents=True, exist_ok=True)
 
-print("Input receptor:", reference_receptor)
+print("Input receptor:", input_receptor)
 print("Raw snapshot dir:", raw_snapdir)
 
-pdb = PDBFile(str(reference_receptor))
-
-# Use implicit solvent for PC speed and robustness.
-# This is not a full explicit-water production MD protocol; it is a receptor
-# conformational sampling benchmark generator.
+pdb = PDBFile(str(input_receptor))
 forcefield = ForceField("amber14-all.xml", "implicit/gbn2.xml")
 
 modeller = Modeller(pdb.topology, pdb.positions)
-print("Adding hydrogens...")
-modeller.addHydrogens(forcefield, pH=7.4)
 
-system = forcefield.createSystem(
-    modeller.topology,
-    nonbondedMethod=NoCutoff,
-    constraints=HBonds,
-)
+topology = None
+positions = None
+
+print("Trying addHydrogens...")
+try:
+    modeller.addHydrogens(forcefield, pH=7.4)
+    topology = modeller.topology
+    positions = modeller.positions
+    print("addHydrogens OK")
+except Exception as error:
+    print("addHydrogens failed; trying existing topology as-is.")
+    print("addHydrogens error:", error)
+    topology = pdb.topology
+    positions = pdb.positions
+
+print("Creating OpenMM system...")
+try:
+    system = forcefield.createSystem(
+        topology,
+        nonbondedMethod=NoCutoff,
+        constraints=HBonds,
+    )
+except Exception as first_error:
+    print("System creation failed with selected topology.")
+    print("Error:", first_error)
+
+    if topology is not pdb.topology:
+        print("Retrying system creation with original PDB topology.")
+        topology = pdb.topology
+        positions = pdb.positions
+        system = forcefield.createSystem(
+            topology,
+            nonbondedMethod=NoCutoff,
+            constraints=HBonds,
+        )
+    else:
+        raise
 
 integrator = LangevinMiddleIntegrator(
     temperature_k * unit.kelvin,
@@ -137,6 +161,7 @@ integrator = LangevinMiddleIntegrator(
     timestep_fs * unit.femtosecond,
 )
 
+platform = None
 platform_name = None
 for candidate in ["CUDA", "OpenCL", "CPU"]:
     try:
@@ -144,25 +169,25 @@ for candidate in ["CUDA", "OpenCL", "CPU"]:
         platform_name = candidate
         break
     except Exception:
-        continue
+        pass
 
-if platform_name is None:
+if platform is None:
     raise SystemExit("No usable OpenMM platform found.")
 
 print("Using OpenMM platform:", platform_name)
 
 if platform_name == "CUDA":
     simulation = Simulation(
-        modeller.topology,
+        topology,
         system,
         integrator,
         platform,
         {"Precision": "mixed"},
     )
 else:
-    simulation = Simulation(modeller.topology, system, integrator, platform)
+    simulation = Simulation(topology, system, integrator, platform)
 
-simulation.context.setPositions(modeller.positions)
+simulation.context.setPositions(positions)
 
 print("Minimizing energy...")
 simulation.minimizeEnergy(maxIterations=1000)
@@ -180,37 +205,33 @@ if equil_steps > 0:
     print("Equilibrating...")
     simulation.step(equil_steps)
 
-print("Writing minimized/equilibrated receptor...")
 state = simulation.context.getState(getPositions=True)
-with (runroot / "receptor_equilibrated_openmm.pdb").open("w") as handle:
+equilibrated = runroot / "receptor_equilibrated_openmm.pdb"
+with equilibrated.open("w") as handle:
     PDBFile.writeFile(simulation.topology, state.getPositions(), handle)
 
+print("Equilibrated receptor:", equilibrated)
 print("Production...")
-written = 0
-steps_done = 0
 
 for idx in range(1, n_snapshots + 1):
     simulation.step(snapshot_interval)
-    steps_done += snapshot_interval
     state = simulation.context.getState(getPositions=True, getEnergy=True)
     outfile = raw_snapdir / f"snapshot_{idx:04d}.pdb"
     with outfile.open("w") as handle:
         PDBFile.writeFile(simulation.topology, state.getPositions(), handle)
-    written += 1
-    potential = state.getPotentialEnergy()
-    print(f"snapshot {idx:04d}: {outfile} | potential={potential}")
+    print(f"snapshot {idx:04d}: {outfile} | potential={state.getPotentialEnergy()}")
 
-print("Snapshots written:", written)
+print("Snapshots written:", n_snapshots)
 PY
 
 echo
 echo "=== ALIGN SNAPSHOTS BACK TO REFERENCE FRAME ==="
 
-python - <<'PY'
+python - <<PY
 from pathlib import Path
 import numpy as np
 
-reference = Path("/mnt/c/Users/kausr/OneDrive/Desktop/compoundrank-data/benchmarks/influenza_neuraminidase_2HU0/2HU0_chainB_receptor_clean.pdb")
+reference = Path("$REFERENCE_RECEPTOR")
 raw_dir = Path("$RAW_SNAPDIR")
 aligned_dir = Path("$ALIGNED_SNAPDIR")
 target_dir = Path("$TARGET_SNAPDIR")
@@ -228,9 +249,7 @@ def parse_atoms(path):
         try:
             atom = {
                 "line": line,
-                "record": line[:6],
                 "atom_name": line[12:16].strip(),
-                "resname": line[17:20].strip(),
                 "chain": line[21].strip(),
                 "resseq": line[22:26].strip(),
                 "icode": line[26].strip(),
@@ -275,37 +294,33 @@ def transform_coord(coord, r, t):
     return coord @ r + t
 
 def rewrite_pdb(path, atoms, r, t, outpath):
-    atom_iter = iter(atoms)
-    by_line = {}
-    for atom in atoms:
-        by_line.setdefault(atom["line"], []).append(atom)
-
-    used = {}
+    atom_idx = 0
     output = []
     for line in path.read_text(errors="replace").splitlines():
-        if line.startswith(("ATOM", "HETATM")):
-            pool = by_line.get(line)
-            if pool:
-                count = used.get(line, 0)
-                atom = pool[min(count, len(pool) - 1)]
-                used[line] = count + 1
-                new_coord = transform_coord(atom["coord"], r, t)
-                line = (
-                    f"{line[:30]}"
-                    f"{new_coord[0]:8.3f}"
-                    f"{new_coord[1]:8.3f}"
-                    f"{new_coord[2]:8.3f}"
-                    f"{line[54:]}"
-                )
+        if line.startswith(("ATOM", "HETATM")) and atom_idx < len(atoms):
+            atom = atoms[atom_idx]
+            atom_idx += 1
+            new_coord = transform_coord(atom["coord"], r, t)
+            line = (
+                f"{line[:30]}"
+                f"{new_coord[0]:8.3f}"
+                f"{new_coord[1]:8.3f}"
+                f"{new_coord[2]:8.3f}"
+                f"{line[54:]}"
+            )
         output.append(line)
 
     if not output or output[-1].strip() != "END":
         output.append("END")
 
-    outpath.write_text("\n".join(output) + "\n", encoding="utf-8")
+    outpath.write_text("\\n".join(output) + "\\n", encoding="utf-8")
 
 ref_atoms = parse_atoms(reference)
 ref_by_key = {a["key"]: a for a in ref_atoms if a["atom_name"] in BACKBONE}
+ref_ca = [a for a in ref_atoms if a["atom_name"] == "CA"]
+
+if len(ref_ca) < 20:
+    raise SystemExit("Reference has too few CA atoms for fallback alignment.")
 
 for raw in sorted(raw_dir.glob("snapshot_*.pdb")):
     mob_atoms = parse_atoms(raw)
@@ -313,13 +328,18 @@ for raw in sorted(raw_dir.glob("snapshot_*.pdb")):
 
     common = sorted(set(ref_by_key) & set(mob_by_key))
 
-    if len(common) < 20:
-        raise SystemExit(
-            f"Too few common backbone atoms to align {raw}: {len(common)}"
-        )
-
-    ref_coords = np.array([ref_by_key[k]["coord"] for k in common])
-    mob_coords = np.array([mob_by_key[k]["coord"] for k in common])
+    if len(common) >= 20:
+        ref_coords = np.array([ref_by_key[k]["coord"] for k in common])
+        mob_coords = np.array([mob_by_key[k]["coord"] for k in common])
+        align_label = f"keyed backbone atoms={len(common)}"
+    else:
+        mob_ca = [a for a in mob_atoms if a["atom_name"] == "CA"]
+        n = min(len(ref_ca), len(mob_ca))
+        if n < 20:
+            raise SystemExit(f"Too few atoms to align {raw}: keyed={len(common)}, CA={n}")
+        ref_coords = np.array([a["coord"] for a in ref_ca[:n]])
+        mob_coords = np.array([a["coord"] for a in mob_ca[:n]])
+        align_label = f"sequential CA atoms={n}"
 
     r, t = kabsch_mobile_to_ref(mob_coords, ref_coords)
     aligned = aligned_dir / raw.name
@@ -329,11 +349,14 @@ for raw in sorted(raw_dir.glob("snapshot_*.pdb")):
     target.write_text(aligned.read_text(encoding="utf-8"), encoding="utf-8")
 
     aligned_atoms = parse_atoms(aligned)
-    aligned_by_key = {a["key"]: a for a in aligned_atoms if a["atom_name"] in BACKBONE}
-    aligned_coords = np.array([aligned_by_key[k]["coord"] for k in common])
-    rmsd = np.sqrt(((aligned_coords - ref_coords) ** 2).sum(axis=1).mean())
+    aligned_ca = [a for a in aligned_atoms if a["atom_name"] == "CA"]
+    n = min(len(ref_ca), len(aligned_ca))
+    rmsd = np.sqrt(
+        ((np.array([a["coord"] for a in aligned_ca[:n]]) -
+          np.array([a["coord"] for a in ref_ca[:n]])) ** 2).sum(axis=1).mean()
+    )
 
-    print(f"{raw.name}: aligned backbone RMSD={rmsd:.3f} Å using {len(common)} atoms")
+    print(f"{raw.name}: aligned RMSD={rmsd:.3f} Å using {align_label}")
 
 print("Aligned snapshots copied to:", target_dir)
 PY
@@ -347,8 +370,6 @@ echo "Snapshot count: $(wc -l < "$BENCH/md_snapshot_receptors.txt")"
 echo
 echo "=== RUN EXORCIST MD-ENSEMBLE BENCHMARK ==="
 cd "$REPO"
-
-# Reuse the committed benchmark runner.
 ./scripts/benchmarks/run_pc_2hu0_md_ensemble_benchmark.sh
 
 echo
