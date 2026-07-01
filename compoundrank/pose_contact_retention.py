@@ -450,6 +450,64 @@ def interpret_contact_retention_row(*, is_primary: bool, retain_reasons: list[st
     return "Alternative not retained by current evidence policy."
 
 
+
+def _confidence_parts_v2(value) -> set[str]:
+    if not value:
+        return set()
+    return {part.strip() for part in str(value).split(";") if part.strip()}
+
+
+def _assign_confidence_tier_v2(row: dict) -> tuple[str, str]:
+    """Assign final production-retention confidence tier."""
+    retained = str(row.get("retain_recommended")).strip().lower() == "true"
+    if not retained:
+        return "not_retained", "Pose was not retained under the current evidence policy."
+
+    reasons = _confidence_parts_v2(row.get("retain_reasons"))
+    tags = _confidence_parts_v2(row.get("evidence_tags"))
+
+    physical_warning_tags = {
+        "possible_clash",
+        "extreme_minimized_affinity",
+        "weak_contact_distance",
+    }
+
+    if physical_warning_tags & tags:
+        return (
+            "physically_warned",
+            "Pose is retained for review but has physical-sanity warnings that reduce confidence.",
+        )
+
+    if str(row.get("candidate_type") or "") == "primary_top_cnn":
+        return (
+            "primary_supported",
+            "Top-CNN primary pose retained without major physical-sanity warnings.",
+        )
+
+    if (
+        "evidence_score_exceeds_primary" in reasons
+        or "known_contact_supported" in reasons
+    ):
+        return (
+            "strong_alternative",
+            "Alternative is retained by strong evidence and has no major physical-sanity warning.",
+        )
+
+    if (
+        "ensemble_recurrent_contacts" in reasons
+        or "near_top_cnn" in reasons
+    ):
+        return (
+            "diagnostic_alternative",
+            "Alternative is retained for diagnostic review, but does not exceed the strong-alternative threshold.",
+        )
+
+    return (
+        "diagnostic_alternative",
+        "Alternative is retained for review under the current evidence policy.",
+    )
+
+
 def write_contact_retention_artifacts(
     output_dir: Path,
     *,
@@ -465,6 +523,12 @@ def write_contact_retention_artifacts(
         known_residues=known_residues,
         config=config,
     )
+
+    # CONFIDENCE_TIER_V2_ENSURE_ROWS
+    for row in rows:
+        confidence_tier, confidence_explanation = _assign_confidence_tier_v2(row)
+        row["confidence_tier"] = confidence_tier
+        row["confidence_explanation"] = confidence_explanation
 
     out_csv = output_dir / "production_pose_retention_candidates.csv"
     out_md = output_dir / "production_pose_retention_report.md"
@@ -493,6 +557,8 @@ def write_contact_retention_artifacts(
         "all_contacts",
         "evidence_tags",
         "retain_reasons",
+        "confidence_tier",
+        "confidence_explanation",
         "interpretation",
     ]
 
@@ -517,13 +583,13 @@ def write_contact_retention_artifacts(
         "",
         "## Retained / Scored Poses",
         "",
-        "| Compound | Retain | Type | File | CNN rank | CNN score | Evidence score | Known overlap | Recurrent overlap | Reasons | Interpretation |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---|---|",
+        "| Compound | Retain | Tier | Type | File | CNN rank | CNN score | Evidence score | Known overlap | Recurrent overlap | Reasons | Interpretation |",
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|---|---|",
     ]
 
     for row in rows:
         md.append(
-            "| {compound} | {retain_recommended} | {candidate_type} | `{hypothesis_file}` | {cnn_rank_within_compound} | {cnn_score} | {evidence_score:.3f} | {known_contact_overlap_count} | {recurrent_contact_overlap_count} | {retain_reasons} | {interpretation} |".format(
+            "| {compound} | {retain_recommended} | {confidence_tier} | {candidate_type} | `{hypothesis_file}` | {cnn_rank_within_compound} | {cnn_score} | {evidence_score:.3f} | {known_contact_overlap_count} | {recurrent_contact_overlap_count} | {retain_reasons} | {interpretation} |".format(
                 **row
             )
         )

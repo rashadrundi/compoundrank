@@ -1,15 +1,15 @@
-"""Ensemble summary for production-style pose retention.
+"""Tier-aware ensemble summary for production-style pose retention.
 
-Reads production_pose_retention_candidates.csv files across multiple retrieved
+Reads production_pose_retention_candidates.csv files across retrieved receptor
 snapshot output directories and summarizes compound-level support.
 
 This does not use RMSD. It summarizes:
-- retained primary hypotheses
-- retained alternatives
-- alternatives that exceed the primary evidence score
-- near-top CNN alternatives
+- primary_supported poses
+- strong_alternative poses
+- diagnostic_alternative poses
+- physically_warned poses
+- alternatives that exceed primary evidence
 - recurrent contacts across receptor snapshots
-- physical-sanity warnings
 """
 
 from __future__ import annotations
@@ -53,6 +53,34 @@ def mean(values):
     return sum(values) / len(values)
 
 
+def infer_confidence_tier(row: dict) -> str:
+    """Fallback for older CSVs that lack confidence_tier."""
+    existing = str(row.get("confidence_tier") or "").strip()
+    if existing:
+        return existing
+
+    retained = parse_bool(row.get("retain_recommended"))
+    if not retained:
+        return "not_retained"
+
+    reasons = split_semicolon(row.get("retain_reasons"))
+    tags = split_semicolon(row.get("evidence_tags"))
+
+    if {"possible_clash", "extreme_minimized_affinity", "weak_contact_distance"} & tags:
+        return "physically_warned"
+
+    if row.get("candidate_type") == "primary_top_cnn":
+        return "primary_supported"
+
+    if "evidence_score_exceeds_primary" in reasons or "known_contact_supported" in reasons:
+        return "strong_alternative"
+
+    if "ensemble_recurrent_contacts" in reasons or "near_top_cnn" in reasons:
+        return "diagnostic_alternative"
+
+    return "diagnostic_alternative"
+
+
 def find_candidate_csvs(runroot: Path) -> list[Path]:
     runroot = Path(runroot)
 
@@ -75,6 +103,7 @@ def read_candidate_rows(candidate_csvs: list[Path]) -> list[dict]:
 
         with csv_path.open(newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
+
             for row in reader:
                 row = dict(row)
                 row["snapshot_run"] = snapshot_run
@@ -94,6 +123,10 @@ def read_candidate_rows(candidate_csvs: list[Path]) -> list[dict]:
                 row["_recurrent_contacts"] = split_semicolon(row.get("recurrent_contact_overlap"))
                 row["_known_contacts"] = split_semicolon(row.get("known_contact_overlap"))
 
+                tier = infer_confidence_tier(row)
+                row["_confidence_tier"] = tier
+                row["confidence_tier"] = tier
+
                 rows.append(row)
 
     return rows
@@ -101,14 +134,14 @@ def read_candidate_rows(candidate_csvs: list[Path]) -> list[dict]:
 
 def summarize_compound(compound: str, rows: list[dict]) -> dict:
     snapshots = sorted({row["snapshot_run"] for row in rows})
+
     retained = [row for row in rows if row["_retain"]]
     primary = [row for row in rows if row.get("candidate_type") == "primary_top_cnn"]
-    retained_primary = [
-        row for row in retained if row.get("candidate_type") == "primary_top_cnn"
-    ]
     retained_alt = [
         row for row in retained if row.get("candidate_type") != "primary_top_cnn"
     ]
+
+    tier_counter = Counter(row["_confidence_tier"] for row in retained)
 
     evidence_exceeds_primary = [
         row for row in retained_alt
@@ -130,12 +163,6 @@ def summarize_compound(compound: str, rows: list[dict]) -> dict:
         row for row in retained
         if "known_contact_supported" in row["_retain_reasons"]
         or row["_known_overlap_count"] > 0
-    ]
-
-    physical_issue = [
-        row for row in retained
-        if "possible_clash" in row["_evidence_tags"]
-        or "extreme_minimized_affinity" in row["_evidence_tags"]
     ]
 
     contact_snapshot_counter: dict[str, set[str]] = defaultdict(set)
@@ -166,20 +193,43 @@ def summarize_compound(compound: str, rows: list[dict]) -> dict:
 
     max_evidence_score = best["_evidence_score"] if best else ""
 
-    if retained_alt and evidence_exceeds_primary:
+    primary_supported_count = tier_counter.get("primary_supported", 0)
+    strong_alternative_count = tier_counter.get("strong_alternative", 0)
+    diagnostic_alternative_count = tier_counter.get("diagnostic_alternative", 0)
+    physically_warned_count = tier_counter.get("physically_warned", 0)
+    not_retained_count = tier_counter.get("not_retained", 0)
+    unknown_tier_count = tier_counter.get("unknown", 0)
+
+    clean_support_count = primary_supported_count + strong_alternative_count
+    warning_ratio = physically_warned_count / len(retained) if retained else 0.0
+
+    if clean_support_count and warning_ratio < 0.34:
+        tier_assessment = "cleaner_support"
         interpretation = (
-            "Retained alternatives repeatedly compete with or exceed the primary "
-            "CNN hypothesis by production-style evidence."
+            "Compound has cleaner support: primary/strong retained poses outweigh "
+            "physical warnings."
         )
-    elif retained_alt:
+    elif clean_support_count and warning_ratio < 0.67:
+        tier_assessment = "mixed_support"
         interpretation = (
-            "Alternatives are retained mainly for recurrence/near-top review, "
-            "but the primary CNN pose remains the stronger hypothesis."
+            "Compound has mixed support: useful retained poses exist, but physical "
+            "warnings require caution."
         )
-    elif retained_primary:
-        interpretation = "Only primary top-CNN hypotheses were retained."
+    elif physically_warned_count:
+        tier_assessment = "warning_dominated"
+        interpretation = (
+            "Compound is warning-dominated: recurrence exists, but most retained "
+            "poses carry physical-sanity warnings."
+        )
+    elif diagnostic_alternative_count:
+        tier_assessment = "diagnostic_only"
+        interpretation = (
+            "Compound is mostly diagnostic: retained alternatives need manual review "
+            "before confidence increases."
+        )
     else:
-        interpretation = "No retained poses under the current policy."
+        tier_assessment = "low_support"
+        interpretation = "Compound has low retained-pose support under the current policy."
 
     return {
         "compound": compound,
@@ -188,23 +238,44 @@ def summarize_compound(compound: str, rows: list[dict]) -> dict:
         "total_rows": len(rows),
         "retained_rows": len(retained),
         "primary_rows": len(primary),
-        "retained_primary_rows": len(retained_primary),
         "retained_alternative_rows": len(retained_alt),
+        "primary_supported_count": primary_supported_count,
+        "strong_alternative_count": strong_alternative_count,
+        "diagnostic_alternative_count": diagnostic_alternative_count,
+        "physically_warned_count": physically_warned_count,
+        "not_retained_count": not_retained_count,
+        "unknown_tier_count": unknown_tier_count,
         "evidence_exceeds_primary_count": len(evidence_exceeds_primary),
         "near_top_cnn_alternative_count": len(near_top),
         "recurrent_supported_retained_count": len(recurrent_supported),
         "known_supported_retained_count": len(known_supported),
-        "physical_issue_retained_count": len(physical_issue),
         "avg_primary_evidence_score": mean(row["_evidence_score"] for row in primary),
         "avg_retained_alternative_evidence_score": mean(row["_evidence_score"] for row in retained_alt),
         "max_evidence_score": max_evidence_score,
         "best_snapshot": best["snapshot_run"] if best else "",
         "best_hypothesis_file": best.get("hypothesis_file", "") if best else "",
         "best_candidate_type": best.get("candidate_type", "") if best else "",
+        "best_confidence_tier": best.get("_confidence_tier", "") if best else "",
         "best_cnn_score": best.get("cnn_score", "") if best else "",
         "top_cross_snapshot_contacts": top_contacts_text,
+        "tier_assessment": tier_assessment,
         "ensemble_interpretation": interpretation,
     }
+
+
+def tier_priority(row: dict) -> tuple:
+    priority = {
+        "strong_alternative": 0,
+        "diagnostic_alternative": 1,
+        "physically_warned": 2,
+        "primary_supported": 3,
+        "not_retained": 4,
+        "unknown": 5,
+    }
+    tier = row.get("_confidence_tier", "unknown")
+    evidence_score = row.get("_evidence_score")
+    score_sort = -(evidence_score if evidence_score is not None else -1e9)
+    return (priority.get(tier, 5), score_sort, row.get("compound", ""), row.get("snapshot_run", ""))
 
 
 def write_ensemble_artifacts(runroot: Path) -> tuple[Path, Path]:
@@ -231,8 +302,9 @@ def write_ensemble_artifacts(runroot: Path) -> tuple[Path, Path]:
         summaries,
         key=lambda row: (
             -row["snapshots_with_compound"],
-            -row["retained_alternative_rows"],
-            -(row["max_evidence_score"] if isinstance(row["max_evidence_score"], float) else -1e9),
+            -row["primary_supported_count"],
+            -row["strong_alternative_count"],
+            row["physically_warned_count"],
             row["compound"],
         ),
     )
@@ -247,21 +319,27 @@ def write_ensemble_artifacts(runroot: Path) -> tuple[Path, Path]:
         "total_rows",
         "retained_rows",
         "primary_rows",
-        "retained_primary_rows",
         "retained_alternative_rows",
+        "primary_supported_count",
+        "strong_alternative_count",
+        "diagnostic_alternative_count",
+        "physically_warned_count",
+        "not_retained_count",
+        "unknown_tier_count",
         "evidence_exceeds_primary_count",
         "near_top_cnn_alternative_count",
         "recurrent_supported_retained_count",
         "known_supported_retained_count",
-        "physical_issue_retained_count",
         "avg_primary_evidence_score",
         "avg_retained_alternative_evidence_score",
         "max_evidence_score",
         "best_snapshot",
         "best_hypothesis_file",
         "best_candidate_type",
+        "best_confidence_tier",
         "best_cnn_score",
         "top_cross_snapshot_contacts",
+        "tier_assessment",
         "ensemble_interpretation",
     ]
 
@@ -275,14 +353,7 @@ def write_ensemble_artifacts(runroot: Path) -> tuple[Path, Path]:
         if row["_retain"] and row.get("candidate_type") != "primary_top_cnn"
     ]
 
-    retained_alts = sorted(
-        retained_alts,
-        key=lambda row: (
-            -(row["_evidence_score"] if row["_evidence_score"] is not None else -1e9),
-            row.get("compound", ""),
-            row.get("snapshot_run", ""),
-        ),
-    )
+    retained_alts = sorted(retained_alts, key=tier_priority)
 
     md = [
         "# Production Pose Retention Ensemble Report",
@@ -294,45 +365,56 @@ def write_ensemble_artifacts(runroot: Path) -> tuple[Path, Path]:
         "",
         "## Purpose",
         "",
-        "This report summarizes production-style pose-retention evidence across receptor snapshots. It does not use RMSD. It asks which compounds repeatedly produce retained primary or alternative hypotheses across conformational variants.",
+        "This report summarizes production-style pose-retention evidence across receptor snapshots. It does not use RMSD. It asks which compounds repeatedly produce retained primary or alternative hypotheses across conformational variants, then separates clean support from physically warned support.",
         "",
-        "## Compound-Level Ensemble Summary",
+        "## Compound-Level Confidence Tier Summary",
         "",
-        "| Compound | Snapshots | Retained rows | Retained alternatives | Alternatives > primary | Physical warnings | Best evidence | Top recurring contacts | Interpretation |",
-        "|---|---:|---:|---:|---:|---:|---:|---|---|",
+        "| Compound | Snapshots | Primary supported | Strong alternatives | Diagnostic alternatives | Physically warned | Alternatives > primary | Best evidence | Assessment | Interpretation |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---|---|",
     ]
 
     for row in summaries:
         best_score = row["max_evidence_score"]
-        if isinstance(best_score, float):
-            best_score_text = f"{best_score:.3f}"
-        else:
-            best_score_text = str(best_score)
+        best_score_text = f"{best_score:.3f}" if isinstance(best_score, float) else str(best_score)
 
         md.append(
-            "| {compound} | {snapshots_with_compound} | {retained_rows} | {retained_alternative_rows} | {evidence_exceeds_primary_count} | {physical_issue_retained_count} | ".format(
+            "| {compound} | {snapshots_with_compound} | {primary_supported_count} | {strong_alternative_count} | {diagnostic_alternative_count} | {physically_warned_count} | {evidence_exceeds_primary_count} | ".format(
                 **row
             )
             + f"{best_score_text} | "
-            + f"{row['top_cross_snapshot_contacts']} | "
+            + f"{row['tier_assessment']} | "
             + f"{row['ensemble_interpretation']} |"
         )
 
     md.extend(
         [
             "",
-            "## Top Retained Alternatives",
+            "## Top Cross-Snapshot Contacts",
             "",
-            "| Compound | Snapshot | File | CNN rank | CNN score | Evidence score | Reasons | Interpretation |",
-            "|---|---|---|---:|---:|---:|---|---|",
+            "| Compound | Top recurring contacts |",
+            "|---|---|",
+        ]
+    )
+
+    for row in summaries:
+        md.append(f"| {row['compound']} | {row['top_cross_snapshot_contacts']} |")
+
+    md.extend(
+        [
+            "",
+            "## Top Retained Alternatives by Confidence Tier",
+            "",
+            "| Compound | Snapshot | Tier | File | CNN rank | CNN score | Evidence score | Reasons | Interpretation |",
+            "|---|---|---|---|---:|---:|---:|---|---|",
         ]
     )
 
     for row in retained_alts[:25]:
         evidence_score = row["_evidence_score"]
         evidence_text = f"{evidence_score:.3f}" if evidence_score is not None else ""
+
         md.append(
-            "| {compound} | {snapshot_run} | `{hypothesis_file}` | {cnn_rank_within_compound} | {cnn_score} | ".format(
+            "| {compound} | {snapshot_run} | {confidence_tier} | `{hypothesis_file}` | {cnn_rank_within_compound} | {cnn_score} | ".format(
                 **row
             )
             + f"{evidence_text} | "
@@ -346,9 +428,10 @@ def write_ensemble_artifacts(runroot: Path) -> tuple[Path, Path]:
             "## Interpretation Notes",
             "",
             "- This is a production-style summary, so it does not use ligand-reference RMSD.",
-            "- Recurrent contacts across snapshots are treated as supporting evidence, not proof of biological correctness.",
+            "- `primary_supported` and `strong_alternative` are cleaner support tiers.",
+            "- `diagnostic_alternative` means the pose is worth reviewing but should not be elevated yet.",
+            "- `physically_warned` means recurrence or CNN support exists, but clash/extreme-affinity warnings reduce confidence.",
             "- Alternatives that exceed the primary evidence score deserve manual review because they may represent cases where top-CNN ranking is not the best structural hypothesis.",
-            "- Physical warnings should reduce confidence even when recurrence or CNN support exists.",
             "",
             f"CSV output: `{out_csv.name}`",
             "",
