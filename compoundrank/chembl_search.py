@@ -2585,9 +2585,11 @@ def make_chembl_candidate(
         "retrieval_reason": (
             "Retrieved from a measured ChEMBL "
             f"activity associated with reference "
-            f"target {reference_label}; transferred "
-            f"as ligand evidence for "
-            f"{submitted_label}."
+            f"target {reference_label}; retained as "
+            "exploratory reference evidence for "
+            f"manual review against {submitted_label}. "
+            "This does not establish ligand, target, "
+            "pocket, or docking transferability."
         ),
         "discovery_query": target.get(
             "discovery_query"
@@ -2700,8 +2702,10 @@ def make_chembl_candidate(
         "source_notes": (
             "The submitted FASTA remains the "
             "docking target. The ChEMBL target is "
-            "a reference source of transferable "
-            "ligand evidence."
+            "a reference source for exploratory "
+            "manual review only; it does not "
+            "establish ligand, target, pocket, "
+            "or docking transferability."
         ),
         "chembl_target_id": target.get(
             "target_chembl_id"

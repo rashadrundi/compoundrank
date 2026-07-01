@@ -81,7 +81,12 @@ TARGET_RULES = [
         "target_class": "viral helicase",
         "enzyme_class": "helicase",
         "keywords": [
+            # Require explicit helicase evidence.
+            # Generic NTPase/ATPase hits are too broad and should not
+            # promote a target to viral helicase by themselves.
             "helicase",
+        ],
+        "weak_keywords": [
             "nucleoside triphosphatase",
             "ntpase",
             "atpase",
