@@ -2776,6 +2776,25 @@ def write_run_report(
         encoding="utf-8",
     )
 
+    # ALTERNATIVE_POSE_RETENTION_POSTWRITE_PATCH
+    alternative_pose_retention_section = _render_alternative_pose_retention_section(output_dir)
+    if alternative_pose_retention_section:
+        report_text = report_path.read_text(encoding="utf-8")
+        section_text = "\n".join(alternative_pose_retention_section).rstrip() + "\n\n"
+
+        if "## Evidence-Aware Alternative Pose Retention" not in report_text:
+            marker = "## Interpretation Limits"
+            if marker in report_text:
+                report_text = report_text.replace(
+                    marker,
+                    section_text + marker,
+                    1,
+                )
+            else:
+                report_text = report_text.rstrip() + "\n\n" + section_text
+
+            report_path.write_text(report_text, encoding="utf-8")
+
     # POSE_RECOVERY_FAILURE_POSTWRITE_PATCH
     pose_recovery_failure_section = _render_pose_recovery_failure_section(output_dir)
     if pose_recovery_failure_section:
@@ -2893,6 +2912,46 @@ def _render_pose_recovery_failure_section(output_dir):
         lines.append("- Failure JSON: `pose_recovery_failure.json`")
     if failure_report.exists():
         lines.append("- Failure report: `pose_recovery_failure_report.md`")
+
+    lines.append("")
+    return lines
+
+
+
+def _render_alternative_pose_retention_section(output_dir):
+    """Render alternative-pose retention artifacts in the main run report."""
+    output_dir = Path(output_dir)
+    retention_report = output_dir / "alternative_pose_retention_report.md"
+    retention_csv = output_dir / "alternative_pose_retention_candidates.csv"
+
+    if not retention_report.exists() and not retention_csv.exists():
+        return []
+
+    lines = [
+        "## Evidence-Aware Alternative Pose Retention",
+        "",
+        "GNINA top-CNN pose remains the primary hypothesis, but alternative poses are retained when they show stronger structural evidence.",
+        "",
+    ]
+
+    if retention_report.exists():
+        report_text = retention_report.read_text(encoding="utf-8")
+        # Drop the top-level title to avoid nested duplicate H1.
+        report_lines = report_text.splitlines()
+        if report_lines and report_lines[0].startswith("# "):
+            report_lines = report_lines[1:]
+        while report_lines and not report_lines[0].strip():
+            report_lines = report_lines[1:]
+        lines.extend(report_lines)
+        lines.append("")
+
+    lines.append("### Retention Artifacts")
+    lines.append("")
+
+    if retention_report.exists():
+        lines.append("- Retention report: `alternative_pose_retention_report.md`")
+    if retention_csv.exists():
+        lines.append("- Retention candidates CSV: `alternative_pose_retention_candidates.csv`")
 
     lines.append("")
     return lines
