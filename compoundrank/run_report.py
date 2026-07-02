@@ -549,102 +549,409 @@ def _read_candidate_csv(path: Path) -> list[dict[str, str]]:
 
 def _render_ligand_retrieval_section(output_dir: Path) -> list[str]:
     stage4a_dir = output_dir / "stage4a_compound_retrieval"
-    candidate_csv = stage4a_dir / "candidate_ligands.csv"
-    docking_manifest = stage4a_dir / "docking_manifest.csv"
-    ligand_report = stage4a_dir / "ligand_search_report.md"
+
+    if stage4a_dir.exists():
+        retrieval_dir = stage4a_dir
+        retrieval_context = "pipeline_nested_stage4a"
+    else:
+        retrieval_dir = output_dir
+        retrieval_context = "standalone_stage4a_or_absent"
+
+    candidate_csv = retrieval_dir / "candidate_ligands.csv"
+    docking_manifest = retrieval_dir / "docking_manifest.csv"
+    ligand_report = retrieval_dir / "ligand_search_report.md"
+    ligand_candidates_json = retrieval_dir / "ligand_candidates.json"
+    query_plan_path = retrieval_dir / "generic_search_queries.json"
+    metadata_path = retrieval_dir / "retrieval_metadata.json"
+    chembl_trace_path = retrieval_dir / "chembl_search_trace.json"
+    docking_skipped_path = output_dir / "docking_skipped.json"
 
     candidates = _read_candidate_csv(candidate_csv)
+    manifest_rows = _read_candidate_csv(docking_manifest)
+    metadata = _load_json(metadata_path) or {}
+    query_plan = _load_json(query_plan_path) or {}
+    chembl_trace = _load_json(chembl_trace_path) or {}
+    docking_skipped = _load_json(docking_skipped_path) or {}
 
-    if not candidates and not stage4a_dir.exists():
+    stage4a_artifacts = [
+        candidate_csv,
+        docking_manifest,
+        ligand_report,
+        ligand_candidates_json,
+        query_plan_path,
+        metadata_path,
+        chembl_trace_path,
+    ]
+
+    if (
+        not candidates
+        and not any(artifact.exists() for artifact in stage4a_artifacts)
+        and not stage4a_dir.exists()
+        and not docking_skipped
+    ):
         return []
+
+    def _display(value: Any) -> str:
+        if value is None:
+            return "unknown"
+        if isinstance(value, list):
+            return ", ".join(_format_value(item) for item in value) or "none"
+        return _format_value(value)
+
+    def _table_value(value: Any) -> str:
+        text = _display(value)
+        text = text.replace("\n", " ").replace("|", "\\|").strip()
+        return text or "unknown"
+
+    def _row_value(row: dict[str, str], *keys: str) -> str:
+        for key in keys:
+            value = row.get(key)
+            if value is not None and str(value).strip():
+                return str(value)
+        return ""
+
+    def _csv_truthy(value: Any) -> bool:
+        return str(value).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "selected",
+            "dockable",
+        }
+
+    def _first_value(*values: Any) -> Any:
+        for value in values:
+            if value is not None and value != "" and value != []:
+                return value
+        return None
+
+    selected_count = sum(
+        1
+        for row in candidates
+        if _csv_truthy(
+            _row_value(
+                row,
+                "selected_for_docking",
+                "dockable",
+                "included_for_docking",
+            )
+        )
+    )
+
+    retrieval_selected_count = _first_value(
+        metadata.get("dockable_count"),
+        selected_count if candidates else None,
+    )
+    manifest_ligand_count = len(manifest_rows)
 
     lines = [
         "## Stage 4A Ligand Retrieval",
         "",
     ]
 
+    if docking_skipped:
+        lines += [
+            "### Docking Status",
+            "",
+            "| Field | Value |",
+            "|---|---|",
+            f"| Stage | {_table_value(docking_skipped.get('stage'))} |",
+            f"| Status | {_table_value(docking_skipped.get('status'))} |",
+            f"| Pipeline outcome | {_table_value(docking_skipped.get('pipeline_outcome'))} |",
+            f"| Reason code | {_table_value(docking_skipped.get('reason_code'))} |",
+            f"| Reason | {_table_value(docking_skipped.get('reason'))} |",
+            f"| Retrieval mode | {_table_value(docking_skipped.get('retrieval_mode'))} |",
+            f"| Dockable ligand count | {_table_value(docking_skipped.get('dockable_ligand_count'))} |",
+            "",
+        ]
+
+    summary_rows: list[tuple[str, Any]] = [
+        ("Retrieval context", retrieval_context),
+        (
+            "Retrieval mode",
+            _first_value(
+                metadata.get("retrieval_mode"),
+                query_plan.get("retrieval_mode"),
+                docking_skipped.get("retrieval_mode"),
+            ),
+        ),
+        ("Candidate count", _first_value(metadata.get("candidate_count"), len(candidates))),
+        ("Retrieval-selected candidate count", retrieval_selected_count),
+        ("Structure-backed manifest ligand rows", manifest_ligand_count),
+        ("Local candidate count", metadata.get("local_candidate_count")),
+        ("ChEMBL candidate count", metadata.get("chembl_candidate_count")),
+        ("ChEMBL target count", metadata.get("chembl_target_count")),
+        ("ChEMBL activity count", metadata.get("chembl_activity_count")),
+        ("Generic query count", metadata.get("generic_query_count")),
+        ("Local rule registry enabled", metadata.get("local_rule_registry_enabled")),
+        (
+            "External database backends enabled",
+            metadata.get("external_database_backends_enabled"),
+        ),
+        ("Hardcoded candidates used", metadata.get("hardcoded_candidates_used")),
+        ("Strict provenance passed", metadata.get("strict_provenance_passed")),
+        ("Query sequence supplied", metadata.get("query_sequence_supplied")),
+        ("Query sequence length", metadata.get("query_sequence_length")),
+    ]
+
+    visible_summary_rows = [
+        (label, value)
+        for label, value in summary_rows
+        if value is not None and value != "" and value != []
+    ]
+
+    if visible_summary_rows:
+        lines += [
+            "### Retrieval Summary",
+            "",
+            "| Field | Value |",
+            "|---|---|",
+        ]
+
+        for label, value in visible_summary_rows:
+            lines.append(f"| {label} | {_table_value(value)} |")
+
+        lines.append("")
+
+    lines += [
+        "### Retrieval Artifacts",
+        "",
+    ]
+
+    for label, artifact in [
+        ("Stage 4A directory", retrieval_dir),
+        ("Candidate table", candidate_csv),
+        ("Docking manifest", docking_manifest),
+        ("Ligand candidate JSON", ligand_candidates_json),
+        ("Ligand search report", ligand_report),
+        ("Generic search queries", query_plan_path),
+        ("Retrieval metadata", metadata_path),
+        ("ChEMBL search trace", chembl_trace_path),
+        ("Docking skipped status", docking_skipped_path),
+    ]:
+        if artifact.exists():
+            lines.append(
+                f"- {label}: `{_relative_or_original(output_dir, artifact)}`"
+            )
+        else:
+            lines.append(f"- {label}: unavailable")
+
+    lines.append("")
+
     if not candidates:
         lines += [
-            "Stage 4A output directory was found, but no candidate ligand CSV was available.",
+            "### Candidate Table",
+            "",
+            "No candidate ligand rows were available for automatic docking.",
             "",
         ]
-        return lines
+    else:
+        def _rank_value(row: dict[str, str]) -> int:
+            try:
+                return int(str(row.get("retrieval_rank", "9999")))
+            except ValueError:
+                return 9999
+
+        candidates = sorted(candidates, key=_rank_value)
+
+        lines += [
+            "### Candidate Table",
+            "",
+            "| Retrieval rank | Compound | Selected for docking | Design status | Evidence | Source databases | ChEMBL ID | PubChem CID | Structure status |",
+            "|---:|---|---|---|---|---|---|---|---|",
+        ]
+
+        for row in candidates:
+            lines.append(
+                "| "
+                f"{_table_value(row.get('retrieval_rank'))} | "
+                f"{_table_value(row.get('compound_name'))} | "
+                f"{_table_value(_row_value(row, 'selected_for_docking', 'dockable', 'included_for_docking'))} | "
+                f"{_table_value(row.get('design_status'))} | "
+                f"{_table_value(row.get('evidence_level'))} | "
+                f"{_table_value(row.get('source_databases'))} | "
+                f"{_table_value(_row_value(row, 'chembl_molecule_id', 'chembl_molecule_chembl_id', 'molecule_chembl_id', 'chembl_id'))} | "
+                f"{_table_value(row.get('pubchem_cid'))} | "
+                f"{_table_value(_row_value(row, 'structure_fetch_status', 'structure_status'))} |"
+            )
+
+        lines.append("")
+
+        lines += [
+            "### Retrieval Basis",
+            "",
+        ]
+
+        seen_basis: set[tuple[str, str, str, str]] = set()
+        for row in candidates:
+            basis = (
+                str(row.get("retrieval_rule_id", "")),
+                str(row.get("target_family_basis", "")),
+                str(row.get("special_domain_label", "")),
+                str(row.get("special_domain_accession", "")),
+            )
+            if basis in seen_basis:
+                continue
+            seen_basis.add(basis)
+
+            rule, family, label, accession = basis
+            lines += [
+                f"- Rule: `{_format_value(rule)}`",
+                f"  - Target family basis: {_format_value(family)}",
+                f"  - Special domain: {_format_value(label)} ({_format_value(accession)})",
+            ]
+
+        lines.append("")
+
+        lines += [
+            "### Candidate Reasoning",
+            "",
+        ]
+
+        for row in candidates[:10]:
+            local_sdf = _relative_or_original(
+                output_dir,
+                _row_value(row, "local_sdf_path", "sdf_path", "structure_path"),
+            )
+
+            lines += [
+                f"#### {_format_value(row.get('compound_name'))}",
+                "",
+                f"- Retrieval reason: {_format_value(row.get('retrieval_reason'))}",
+                f"- Retrieval rule: {_format_value(row.get('retrieval_rule_id'))}",
+                f"- Target family basis: {_format_value(row.get('target_family_basis'))}",
+                f"- Retrieval terms: {_format_value(row.get('retrieval_terms'))}",
+                f"- Source databases: {_format_value(row.get('source_databases'))}",
+            ]
+
+            if local_sdf:
+                lines.append(f"- Local SDF: `{local_sdf}`")
+
+            lines.append("")
+
+        if len(candidates) > 10:
+            lines += [
+                f"_Only the first 10 candidates are shown here. See `{_relative_or_original(output_dir, candidate_csv)}` for the full table._",
+                "",
+            ]
+
+    queries = query_plan.get("queries")
+    if not isinstance(queries, list):
+        queries = []
+
+    if queries:
+        lines += [
+            "### Generic Search Queries",
+            "",
+        ]
+
+        for query in queries[:12]:
+            if isinstance(query, dict):
+                query_text = _first_value(
+                    query.get("query"),
+                    query.get("search_query"),
+                    query.get("target_query"),
+                    query.get("term"),
+                    query.get("text"),
+                    query,
+                )
+                query_kind = _first_value(
+                    query.get("query_type"),
+                    query.get("scope"),
+                    query.get("source"),
+                )
+
+                if query_kind:
+                    lines.append(
+                        f"- `{_table_value(query_text)}` — {_table_value(query_kind)}"
+                    )
+                else:
+                    lines.append(f"- `{_table_value(query_text)}`")
+            else:
+                lines.append(f"- `{_table_value(query)}`")
+
+        if len(queries) > 12:
+            lines.append(
+                f"- _{len(queries) - 12} additional query records omitted from this summary._"
+            )
+
+        lines.append("")
+
+    targets = chembl_trace.get("targets")
+    if not isinstance(targets, list):
+        targets = []
+
+    if targets:
+        lines += [
+            "### ChEMBL Target Resolution Trace",
+            "",
+            "| Rank | Target ChEMBL ID | Target name | Organism | Resolution route | Activity count |",
+            "|---:|---|---|---|---|---:|",
+        ]
+
+        for index, target in enumerate(targets[:10], start=1):
+            if not isinstance(target, dict):
+                continue
+
+            target_id = _first_value(
+                target.get("target_chembl_id"),
+                target.get("chembl_id"),
+                target.get("id"),
+            )
+            target_name = _first_value(
+                target.get("target_name"),
+                target.get("target_pref_name"),
+                target.get("pref_name"),
+                target.get("preferred_name"),
+                target.get("name"),
+            )
+            route = _first_value(
+                target.get("target_resolution_route"),
+                target.get("resolution_route"),
+                target.get("route"),
+            )
+            activity_count = _first_value(
+                target.get("activity_count"),
+                target.get("activities_count"),
+                target.get("candidate_activity_count"),
+                target.get("retained_activity_count"),
+                0,
+            )
+
+            lines.append(
+                "| "
+                f"{index} | "
+                f"{_table_value(target_id)} | "
+                f"{_table_value(target_name)} | "
+                f"{_table_value(target.get('organism'))} | "
+                f"{_table_value(route)} | "
+                f"{_table_value(activity_count)} |"
+            )
+
+        if len(targets) > 10:
+            lines.append(
+                f"|  | _{len(targets) - 10} additional target records omitted from this summary._ |  |  |  |  |"
+            )
+
+        lines.append("")
+    elif chembl_trace:
+        lines += [
+            "### ChEMBL Target Resolution Trace",
+            "",
+            "ChEMBL trace metadata was present, but no resolved target records were listed.",
+            "",
+        ]
 
     lines += [
-        f"- Candidate table: `{_relative_or_original(output_dir, candidate_csv)}`",
-        f"- Docking manifest: `{_relative_or_original(output_dir, docking_manifest)}`" if docking_manifest.exists() else "- Docking manifest: unavailable",
-        f"- Ligand search report: `{_relative_or_original(output_dir, ligand_report)}`" if ligand_report.exists() else "- Ligand search report: unavailable",
-        f"- Retrieved candidate count: {len(candidates)}",
+        "### Retrieval Interpretation Limits",
         "",
-        "| Retrieval rank | Compound | Design status | Evidence | Rule | PubChem CID | Structure status |",
-        "|---:|---|---|---|---|---|---|",
-    ]
-
-    def _rank_value(row: dict[str, str]) -> int:
-        try:
-            return int(str(row.get("retrieval_rank", "9999")))
-        except ValueError:
-            return 9999
-
-    candidates = sorted(candidates, key=_rank_value)
-
-    for row in candidates:
-        lines.append(
-            "| "
-            f"{_format_value(row.get('retrieval_rank'))} | "
-            f"{_format_value(row.get('compound_name'))} | "
-            f"{_format_value(row.get('design_status'))} | "
-            f"{_format_value(row.get('evidence_level'))} | "
-            f"{_format_value(row.get('retrieval_rule_id'))} | "
-            f"{_format_value(row.get('pubchem_cid'))} | "
-            f"{_format_value(row.get('structure_fetch_status'))} |"
-        )
-
-    lines += [
-        "",
-        "### Retrieval Basis",
+        "- Retrieved ligands are computational candidates, not confirmed inhibitors of the submitted target.",
+        "- Local rule-derived compounds and external database-derived compounds should be distinguished during review.",
+        "- `generic-strict` retrieval is intended to verify that docking candidates can be produced without target-class seed compounds.",
+        "- Docking, pose validity, biological mechanism, and experimental validation remain separate evidence gates.",
         "",
     ]
-
-    seen_basis: set[tuple[str, str, str, str]] = set()
-    for row in candidates:
-        basis = (
-            str(row.get("retrieval_rule_id", "")),
-            str(row.get("target_family_basis", "")),
-            str(row.get("special_domain_label", "")),
-            str(row.get("special_domain_accession", "")),
-        )
-        if basis in seen_basis:
-            continue
-        seen_basis.add(basis)
-
-        rule, family, label, accession = basis
-        lines += [
-            f"- Rule: `{_format_value(rule)}`",
-            f"  - Target family basis: {_format_value(family)}",
-            f"  - Special domain: {_format_value(label)} ({_format_value(accession)})",
-        ]
-
-    lines += [
-        "",
-        "### Candidate Reasoning",
-        "",
-    ]
-
-    for row in candidates[:10]:
-        lines += [
-            f"#### {_format_value(row.get('compound_name'))}",
-            "",
-            f"- Retrieval reason: {_format_value(row.get('retrieval_reason'))}",
-            f"- Local SDF: `{_relative_or_original(output_dir, row.get('local_sdf_path'))}`",
-            "",
-        ]
-
-    if len(candidates) > 10:
-        lines += [
-            f"_Only the first 10 candidates are shown here. See `{_relative_or_original(output_dir, candidate_csv)}` for the full table._",
-            "",
-        ]
 
     return lines
 
@@ -2462,10 +2769,88 @@ def write_run_report(
     )
 
     report_path = output_dir / report_name
+
+
     report_path.write_text(
         report_text,
         encoding="utf-8",
     )
+
+    # PRODUCTION_POSE_RETENTION_ENSEMBLE_POSTWRITE_PATCH
+    production_pose_retention_ensemble_section = _render_production_pose_retention_ensemble_section(output_dir)
+    if production_pose_retention_ensemble_section:
+        report_text = report_path.read_text(encoding="utf-8")
+        section_text = "\n".join(production_pose_retention_ensemble_section).rstrip() + "\n\n"
+
+        if "## Production Pose Retention Ensemble Summary" not in report_text:
+            marker = "## Interpretation Limits"
+            if marker in report_text:
+                report_text = report_text.replace(
+                    marker,
+                    section_text + marker,
+                    1,
+                )
+            else:
+                report_text = report_text.rstrip() + "\n\n" + section_text
+
+            report_path.write_text(report_text, encoding="utf-8")
+
+    # PRODUCTION_POSE_RETENTION_POSTWRITE_PATCH
+    production_pose_retention_section = _render_production_pose_retention_section(output_dir)
+    if production_pose_retention_section:
+        report_text = report_path.read_text(encoding="utf-8")
+        section_text = "\n".join(production_pose_retention_section).rstrip() + "\n\n"
+
+        if "## Production-Style Pose Evidence Retention" not in report_text:
+            marker = "## Interpretation Limits"
+            if marker in report_text:
+                report_text = report_text.replace(
+                    marker,
+                    section_text + marker,
+                    1,
+                )
+            else:
+                report_text = report_text.rstrip() + "\n\n" + section_text
+
+            report_path.write_text(report_text, encoding="utf-8")
+
+    # ALTERNATIVE_POSE_RETENTION_POSTWRITE_PATCH
+    alternative_pose_retention_section = _render_alternative_pose_retention_section(output_dir)
+    if alternative_pose_retention_section:
+        report_text = report_path.read_text(encoding="utf-8")
+        section_text = "\n".join(alternative_pose_retention_section).rstrip() + "\n\n"
+
+        if "## Evidence-Aware Alternative Pose Retention" not in report_text:
+            marker = "## Interpretation Limits"
+            if marker in report_text:
+                report_text = report_text.replace(
+                    marker,
+                    section_text + marker,
+                    1,
+                )
+            else:
+                report_text = report_text.rstrip() + "\n\n" + section_text
+
+            report_path.write_text(report_text, encoding="utf-8")
+
+    # POSE_RECOVERY_FAILURE_POSTWRITE_PATCH
+    pose_recovery_failure_section = _render_pose_recovery_failure_section(output_dir)
+    if pose_recovery_failure_section:
+        report_text = report_path.read_text(encoding="utf-8")
+        section_text = "\n".join(pose_recovery_failure_section).rstrip() + "\n\n"
+
+        if "## Pose Recovery Failure" not in report_text:
+            marker = "## Interpretation Limits"
+            if marker in report_text:
+                report_text = report_text.replace(
+                    marker,
+                    section_text + marker,
+                    1,
+                )
+            else:
+                report_text = report_text.rstrip() + "\n\n" + section_text
+
+            report_path.write_text(report_text, encoding="utf-8")
 
     return report_path
 
@@ -2488,6 +2873,210 @@ def main() -> int:
     print(f"Run report: {report_path}")
     return 0
 
+
+
+def _render_pose_recovery_failure_section(output_dir):
+    """Render pose-recovery failure artifacts in the main run report."""
+    output_dir = Path(output_dir)
+    failure_json = output_dir / "pose_recovery_failure.json"
+    failure_report = output_dir / "pose_recovery_failure_report.md"
+
+    if not failure_json.exists() and not failure_report.exists():
+        return []
+
+    data = {}
+    if failure_json.exists():
+        try:
+            data = json.loads(failure_json.read_text(encoding="utf-8"))
+        except Exception as error:
+            data = {
+                "pose_recovery_status": "failed",
+                "failure_type": "json_parse_error",
+                "error": f"Could not parse pose_recovery_failure.json: {error}",
+            }
+
+    def value(key, default="unknown"):
+        raw = data.get(key, default)
+        if raw is None or raw == "":
+            return default
+        return raw
+
+    lines = [
+        "## Pose Recovery Failure",
+        "",
+        "Pose recovery was requested, but RMSD evaluation could not be completed for this run.",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| Status | {value('pose_recovery_status', 'failed')} |",
+        f"| Failure type | {value('failure_type')} |",
+        f"| Selected compound | `{value('selected_compound')}` |",
+        f"| Selected receptor conformer | `{value('selected_receptor_conformer')}` |",
+        f"| Selected pocket | `{value('selected_pocket_id')}` |",
+        f"| Reference ligand | `{value('reference_ligand')}` |",
+        f"| RMSD threshold | {value('rmsd_threshold', 'unavailable')} |",
+        "",
+    ]
+
+    error_text = value("error", "")
+    if error_text:
+        lines.extend(
+            [
+                "### Pose-Recovery Error",
+                "",
+                "```text",
+                str(error_text),
+                "```",
+                "",
+            ]
+        )
+
+    interpretation = value(
+        "interpretation",
+        "Docking results remain available, but pose-recovery RMSD metrics are unavailable for this run.",
+    )
+    lines.extend(
+        [
+            "### Interpretation",
+            "",
+            str(interpretation),
+            "",
+            "### Pose-Recovery Failure Artifacts",
+            "",
+        ]
+    )
+
+    if failure_json.exists():
+        lines.append("- Failure JSON: `pose_recovery_failure.json`")
+    if failure_report.exists():
+        lines.append("- Failure report: `pose_recovery_failure_report.md`")
+
+    lines.append("")
+    return lines
+
+
+
+def _render_alternative_pose_retention_section(output_dir):
+    """Render alternative-pose retention artifacts in the main run report."""
+    output_dir = Path(output_dir)
+    retention_report = output_dir / "alternative_pose_retention_report.md"
+    retention_csv = output_dir / "alternative_pose_retention_candidates.csv"
+
+    if not retention_report.exists() and not retention_csv.exists():
+        return []
+
+    lines = [
+        "## Evidence-Aware Alternative Pose Retention",
+        "",
+        "GNINA top-CNN pose remains the primary hypothesis, but alternative poses are retained when they show stronger structural evidence.",
+        "",
+    ]
+
+    if retention_report.exists():
+        report_text = retention_report.read_text(encoding="utf-8")
+        # Drop the top-level title to avoid nested duplicate H1.
+        report_lines = report_text.splitlines()
+        if report_lines and report_lines[0].startswith("# "):
+            report_lines = report_lines[1:]
+        while report_lines and not report_lines[0].strip():
+            report_lines = report_lines[1:]
+        lines.extend(report_lines)
+        lines.append("")
+
+    lines.append("### Retention Artifacts")
+    lines.append("")
+
+    if retention_report.exists():
+        lines.append("- Retention report: `alternative_pose_retention_report.md`")
+    if retention_csv.exists():
+        lines.append("- Retention candidates CSV: `alternative_pose_retention_candidates.csv`")
+
+    lines.append("")
+    return lines
+
+
+
+def _render_production_pose_retention_section(output_dir):
+    """Render production-style pose-retention artifacts in the main run report."""
+    output_dir = Path(output_dir)
+    retention_report = output_dir / "production_pose_retention_report.md"
+    retention_csv = output_dir / "production_pose_retention_candidates.csv"
+
+    if not retention_report.exists() and not retention_csv.exists():
+        return []
+
+    lines = [
+        "## Production-Style Pose Evidence Retention",
+        "",
+        "This section retains alternative docking hypotheses using production-style evidence such as contact recurrence, physical sanity, clustering support, known-residue overlap when available, and near-top CNN score.",
+        "",
+    ]
+
+    if retention_report.exists():
+        report_text = retention_report.read_text(encoding="utf-8")
+        report_lines = report_text.splitlines()
+
+        if report_lines and report_lines[0].startswith("# "):
+            report_lines = report_lines[1:]
+
+        while report_lines and not report_lines[0].strip():
+            report_lines = report_lines[1:]
+
+        lines.extend(report_lines)
+        lines.append("")
+
+    lines.append("### Production Pose-Retention Artifacts")
+    lines.append("")
+
+    if retention_report.exists():
+        lines.append("- Production retention report: `production_pose_retention_report.md`")
+    if retention_csv.exists():
+        lines.append("- Production retention candidates CSV: `production_pose_retention_candidates.csv`")
+
+    lines.append("")
+    return lines
+
+
+
+def _render_production_pose_retention_ensemble_section(output_dir):
+    """Render ensemble-level production pose-retention artifacts in the main run report."""
+    output_dir = Path(output_dir)
+    ensemble_report = output_dir / "production_pose_retention_ensemble_report.md"
+    ensemble_csv = output_dir / "production_pose_retention_ensemble_summary.csv"
+
+    if not ensemble_report.exists() and not ensemble_csv.exists():
+        return []
+
+    lines = [
+        "## Production Pose Retention Ensemble Summary",
+        "",
+        "This section summarizes production-style retained pose evidence across receptor snapshots. It does not use RMSD; it summarizes recurrence, alternative-pose support, evidence-score competition with the primary CNN pose, and physical-warning burden.",
+        "",
+    ]
+
+    if ensemble_report.exists():
+        report_text = ensemble_report.read_text(encoding="utf-8")
+        report_lines = report_text.splitlines()
+
+        if report_lines and report_lines[0].startswith("# "):
+            report_lines = report_lines[1:]
+
+        while report_lines and not report_lines[0].strip():
+            report_lines = report_lines[1:]
+
+        lines.extend(report_lines)
+        lines.append("")
+
+    lines.append("### Ensemble Retention Artifacts")
+    lines.append("")
+
+    if ensemble_report.exists():
+        lines.append("- Ensemble retention report: `production_pose_retention_ensemble_report.md`")
+    if ensemble_csv.exists():
+        lines.append("- Ensemble retention summary CSV: `production_pose_retention_ensemble_summary.csv`")
+
+    lines.append("")
+    return lines
 
 if __name__ == "__main__":
     raise SystemExit(main())
