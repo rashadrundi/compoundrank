@@ -841,6 +841,103 @@ def _resolve_pocket_evidence_json(
     return evidence_path
 
 
+_STRUCTURE_QUALITY_HARD_STOP_FLAGS = {
+    "high_outlier_fraction",
+    "insufficient_geometry",
+}
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_receptor_ramachandran_structure_quality_failure(
+    output_dir: Path,
+) -> dict[str, object] | None:
+    report_path = (
+        output_dir
+        / "structure_validation"
+        / "receptor"
+        / "ramachandran_validation.json"
+    )
+
+    if not report_path.exists():
+        return None
+
+    try:
+        report = json.loads(
+            report_path.read_text(encoding="utf-8")
+        )
+    except (json.JSONDecodeError, OSError) as exc:
+        return {
+            "reason_code": "ramachandran_report_unreadable",
+            "status": "failed",
+            "screening_flag": "ramachandran_report_unreadable",
+            "report": str(report_path),
+            "error": str(exc),
+        }
+
+    if not isinstance(report, dict):
+        return {
+            "reason_code": "ramachandran_report_invalid",
+            "status": "failed",
+            "screening_flag": "ramachandran_report_invalid",
+            "report": str(report_path),
+        }
+
+    summary = report.get("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+
+    status_value = report.get("status")
+    status = str(status_value) if status_value is not None else None
+
+    screening_flag_value = summary.get("screening_flag")
+    screening_flag = (
+        str(screening_flag_value)
+        if screening_flag_value is not None
+        else None
+    )
+
+    if screening_flag is None and status == "insufficient_geometry":
+        screening_flag = "insufficient_geometry"
+
+    hard_stop = (
+        status != "complete"
+        or screening_flag in _STRUCTURE_QUALITY_HARD_STOP_FLAGS
+    )
+
+    if not hard_stop:
+        return None
+
+    return {
+        "reason_code": "ramachandran_structure_quality_failed",
+        "status": status,
+        "screening_flag": screening_flag,
+        "report": str(report_path),
+        "selection_mode": report.get("selection_mode"),
+        "source_structure": report.get("source_structure"),
+        "structure_name": report.get("structure_name"),
+        "evaluable_residues": report.get("evaluable_residues"),
+        "total_polymer_residues": report.get("total_polymer_residues"),
+        "favored_fraction": _float_or_none(
+            summary.get("favored_fraction")
+        ),
+        "outlier_fraction": _float_or_none(
+            summary.get("outlier_fraction")
+        ),
+        "favored_goal_met": summary.get("favored_goal_met"),
+        "outlier_goal_met": summary.get("outlier_goal_met"),
+        "outliers": summary.get("outliers"),
+    }
+
+
 def _run_structure_validation(
     *,
     structure_path: Path,
@@ -1785,6 +1882,73 @@ def run_pipeline(
 
         generated_manifest = retrieval_outputs["docking_manifest"]
         ligand_requests = read_manifest(generated_manifest)
+
+        structure_quality_failure = (
+            _read_receptor_ramachandran_structure_quality_failure(
+                output_dir
+            )
+        )
+
+        if structure_quality_failure is not None:
+            skip_reason = (
+                "Structure quality validation failed before "
+                "automatic docking. Ramachandran geometry "
+                "indicates the submitted receptor should not "
+                "be used for docking without model review, "
+                "refolding, replacement, or additional "
+                "structure-quality remediation."
+            )
+
+            skip_payload = {
+                "stage": "docking",
+                "status": "skipped",
+                "pipeline_outcome": "completed_without_docking",
+                "reason_code": "structure_quality_failed",
+                "reason": skip_reason,
+                "retrieval_mode": auto_retrieve_mode,
+                "dockable_ligand_count": len(ligand_requests),
+                "docking_manifest": str(generated_manifest),
+                "retrieval_outputs": {
+                    str(name): str(value)
+                    for name, value in retrieval_outputs.items()
+                },
+                "structure_quality": structure_quality_failure,
+                "downstream_stages": {
+                    "receptor_preparation": "skipped",
+                    "pocket_detection": "skipped",
+                    "ligand_preparation": "skipped",
+                    "gnina_docking": "skipped",
+                    "pose_validation": "skipped",
+                    "pose_ranking": "skipped",
+                },
+            }
+
+            skip_path = output_dir / "docking_skipped.json"
+
+            skip_path.write_text(
+                json.dumps(
+                    skip_payload,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            print("[DOCKING SKIPPED] Structure quality gate failed.")
+            print(
+                "[DOCKING SKIPPED] Structure flag: "
+                f"{structure_quality_failure.get('screening_flag')}"
+            )
+            print("[DOCKING SKIPPED] Reason: " f"{skip_reason}")
+            print("[DOCKING SKIPPED] Manifest: " f"{generated_manifest}")
+            print("[DOCKING SKIPPED] Status: " f"{skip_path}")
+
+            run_report_path = write_run_report(output_dir=output_dir)
+
+            print("\n[REPORT] Run report: " f"{run_report_path}")
+
+            return []
 
         if not ligand_requests:
             if auto_retrieve_mode == "generic-strict":
