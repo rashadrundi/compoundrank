@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,7 +28,43 @@ def build_parser() -> argparse.ArgumentParser:
             "filtering, clustering, interaction evidence, and uncertainty."
         )
     )
-    parser.add_argument("--receptor", required=True, help="Absolute receptor PDB path")
+    parser.add_argument(
+        "--receptor",
+        default=None,
+        help=(
+            "Optional absolute receptor PDB path. If omitted with --fasta, "
+            "CompoundRank enters pure-FASTA mode and attempts receptor "
+            "structure prediction/acquisition before docking."
+        ),
+    )
+    parser.add_argument(
+        "--skip-structure-prediction",
+        action="store_true",
+        help=(
+            "Pure-FASTA mode only: do not run a structure predictor. "
+            "Write no_receptor_structure_available artifacts instead."
+        ),
+    )
+    parser.add_argument(
+        "--structure-predictor-bin",
+        default=os.environ.get(
+            "COMPOUNDRANK_STRUCTURE_PREDICTOR_BIN",
+            "colabfold_batch",
+        ),
+        help=(
+            "Executable used for pure-FASTA receptor prediction. "
+            "Default: colabfold_batch or COMPOUNDRANK_STRUCTURE_PREDICTOR_BIN."
+        ),
+    )
+    parser.add_argument(
+        "--structure-predictor-extra-arg",
+        action="append",
+        default=[],
+        help=(
+            "Extra argument passed to the structure predictor. "
+            "Repeat this option for multiple arguments."
+        ),
+    )
     parser.add_argument(
         "--receptor-ensemble-json",
         default=None,
@@ -337,9 +375,270 @@ def load_box_json(path):
 
     return {key: float(data[key]) for key in required}
 
+
+def _candidate_predicted_receptor_pdbs(folding_dir: Path) -> list[Path]:
+    """Return predicted receptor PDB candidates sorted by conservative preference."""
+    if not folding_dir.exists():
+        return []
+
+    candidates = [
+        path
+        for path in folding_dir.rglob("*.pdb")
+        if path.is_file()
+    ]
+
+    def score(path: Path) -> tuple[int, int, int, str]:
+        name = path.name.lower()
+
+        if "rank_001" in name or "rank_1" in name:
+            rank_score = 0
+        elif "model_1" in name:
+            rank_score = 1
+        else:
+            rank_score = 2
+
+        # Prefer relaxed models if present, but do not confuse "unrelaxed"
+        # with "relaxed".
+        if "relaxed" in name and "unrelaxed" not in name:
+            relaxation_score = 0
+        elif "unrelaxed" in name:
+            relaxation_score = 1
+        else:
+            relaxation_score = 2
+
+        return (rank_score, relaxation_score, len(name), name)
+
+    return sorted(candidates, key=score)
+
+
+def _write_pure_fasta_no_receptor_artifacts(
+    *,
+    output_dir: Path,
+    fasta_path: Path,
+    folding_dir: Path,
+    reason: str,
+    attempted_prediction: bool,
+    command: list[str] | None = None,
+    exit_code: int | None = None,
+) -> None:
+    """Write a clean abstention artifact when pure FASTA cannot produce a receptor."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "stage": "structure_acquisition",
+        "status": "skipped",
+        "pipeline_outcome": "completed_without_docking",
+        "reason_code": "no_receptor_structure_available",
+        "reason": reason,
+        "fasta": str(fasta_path),
+        "structure_prediction": {
+            "attempted": attempted_prediction,
+            "folding_dir": str(folding_dir),
+            "command": command,
+            "exit_code": exit_code,
+        },
+        "downstream_stages": {
+            "structure_validation": "skipped",
+            "target_evidence": "skipped",
+            "compound_retrieval": "skipped",
+            "receptor_preparation": "skipped",
+            "pocket_detection": "skipped",
+            "ligand_preparation": "skipped",
+            "gnina_docking": "skipped",
+            "pose_validation": "skipped",
+            "pose_ranking": "skipped",
+        },
+    }
+
+    for filename in (
+        "pure_fasta_structure_status.json",
+        "docking_skipped.json",
+    ):
+        (output_dir / filename).write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    report = output_dir / "compoundrank_run_report.md"
+    report.write_text(
+        "\n".join(
+            [
+                "# CompoundRank Pure-FASTA Run Report",
+                "",
+                "## Outcome",
+                "",
+                "Docking was skipped.",
+                "",
+                f"- Reason code: `{payload['reason_code']}`",
+                f"- Reason: {reason}",
+                f"- FASTA: `{fasta_path}`",
+                f"- Structure prediction attempted: {attempted_prediction}",
+                f"- Folding directory: `{folding_dir}`",
+                "",
+                "## Interpretation",
+                "",
+                "No receptor structure was available for docking. This is a clean",
+                "abstention result, not a candidate-discovery result.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _resolve_receptor_from_pure_fasta(
+    *,
+    fasta_path: Path,
+    output_dir: Path,
+    structure_predictor_bin: str,
+    structure_predictor_extra_args: list[str],
+    skip_structure_prediction: bool,
+) -> Path | None:
+    """Resolve a receptor PDB from FASTA by reusing or running structure prediction."""
+    folding_dir = output_dir / "folding" / "colabfold"
+    folding_dir.mkdir(parents=True, exist_ok=True)
+
+    existing = _candidate_predicted_receptor_pdbs(folding_dir)
+    if existing:
+        receptor = existing[0]
+        (output_dir / "receptor_pdb.txt").write_text(
+            str(receptor) + "\n",
+            encoding="utf-8",
+        )
+        print(f"[PURE FASTA] Reusing predicted receptor: {receptor}")
+        return receptor
+
+    if skip_structure_prediction:
+        reason = (
+            "Pure-FASTA mode was requested without a receptor, but structure "
+            "prediction was disabled by --skip-structure-prediction."
+        )
+        _write_pure_fasta_no_receptor_artifacts(
+            output_dir=output_dir,
+            fasta_path=fasta_path,
+            folding_dir=folding_dir,
+            reason=reason,
+            attempted_prediction=False,
+        )
+        print("[PURE FASTA] Docking skipped: no receptor structure available.")
+        return None
+
+    predictor = shutil.which(structure_predictor_bin)
+    if predictor is None:
+        reason = (
+            "Pure-FASTA mode was requested without a receptor, but the structure "
+            f"predictor executable was not found: {structure_predictor_bin}."
+        )
+        _write_pure_fasta_no_receptor_artifacts(
+            output_dir=output_dir,
+            fasta_path=fasta_path,
+            folding_dir=folding_dir,
+            reason=reason,
+            attempted_prediction=False,
+        )
+        print("[PURE FASTA] Docking skipped: structure predictor not found.")
+        return None
+
+    command = [
+        predictor,
+        str(fasta_path),
+        str(folding_dir),
+        *structure_predictor_extra_args,
+    ]
+
+    print("[PURE FASTA] Running structure prediction:")
+    print("[PURE FASTA] " + " ".join(command))
+
+    stdout_path = folding_dir / "structure_prediction_stdout.log"
+    stderr_path = folding_dir / "structure_prediction_stderr.log"
+
+    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
+        "w",
+        encoding="utf-8",
+    ) as stderr:
+        completed = subprocess.run(
+            command,
+            stdout=stdout,
+            stderr=stderr,
+            text=True,
+            check=False,
+        )
+
+    candidates = _candidate_predicted_receptor_pdbs(folding_dir)
+    if not candidates:
+        reason = (
+            "Structure prediction finished but no receptor PDB was found in "
+            "the expected folding output directory."
+        )
+        _write_pure_fasta_no_receptor_artifacts(
+            output_dir=output_dir,
+            fasta_path=fasta_path,
+            folding_dir=folding_dir,
+            reason=reason,
+            attempted_prediction=True,
+            command=command,
+            exit_code=completed.returncode,
+        )
+        print("[PURE FASTA] Docking skipped: no predicted receptor PDB found.")
+        return None
+
+    receptor = candidates[0]
+
+    manifest = {
+        "schema_version": "pure_fasta_structure_prediction.v0.1",
+        "status": "complete",
+        "fasta": str(fasta_path),
+        "folding_dir": str(folding_dir),
+        "command": command,
+        "exit_code": completed.returncode,
+        "selected_receptor_pdb": str(receptor),
+        "candidate_receptor_pdbs": [str(path) for path in candidates],
+        "stdout_log": str(stdout_path),
+        "stderr_log": str(stderr_path),
+    }
+
+    (output_dir / "structure_prediction_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (output_dir / "receptor_pdb.txt").write_text(
+        str(receptor) + "\n",
+        encoding="utf-8",
+    )
+
+    print(f"[PURE FASTA] Selected receptor: {receptor}")
+    return receptor
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    receptor = require_absolute_external_file(args.receptor, "Receptor PDB")
+
+    pure_fasta_mode = args.receptor is None and args.fasta is not None
+    manual_ligand_inputs = any(
+        (
+            args.ligand_file,
+            args.ligand_cid,
+            args.ligand_smiles,
+            args.ligand_manifest,
+        )
+    )
+
+    if (
+        pure_fasta_mode
+        and not manual_ligand_inputs
+        and not args.auto_retrieve_ligands
+    ):
+        args.auto_retrieve_ligands = True
+        args.auto_retrieve_mode = "generic-strict"
+        print(
+            "[PURE FASTA] No ligands supplied; enabling "
+            "generic-strict ligand retrieval by default."
+        )
+    receptor = (
+        require_absolute_external_file(args.receptor, "Receptor PDB")
+        if args.receptor
+        else None
+    )
     receptor_ensemble_json = (
         require_absolute_external_file(
             args.receptor_ensemble_json,
@@ -361,9 +660,57 @@ def main(argv: list[str] | None = None) -> int:
         receptor_ensemble_json,
         aligned_receptor_ensemble_json,
     )
-    if receptor.suffix.lower() != ".pdb":
+    if receptor is not None and receptor.suffix.lower() != ".pdb":
         raise ValueError("--receptor must be a PDB file")
     data_root = require_absolute_external_dir(args.data_root, "Data root", create=True)
+
+    # Early pure-FASTA structure acquisition/abstention gate.
+    #
+    # This must happen before older ligand/reference/manifest handling because
+    # several legacy CLI paths assume a receptor-backed run. In pure-FASTA mode,
+    # no receptor exists yet.
+    if pure_fasta_mode:
+        if args.fasta is None:
+            raise ValueError(
+                "Pure-FASTA mode requires --fasta when --receptor is omitted."
+            )
+
+        if receptor_ensemble_json is not None or aligned_receptor_ensemble_json is not None:
+            raise ValueError(
+                "Receptor ensemble options require --receptor until "
+                "pure-FASTA ensemble generation is implemented."
+            )
+
+        fasta_for_structure = require_absolute_external_file(
+            args.fasta,
+            "FASTA",
+        )
+
+        if args.output_dir:
+            output_dir = Path(args.output_dir)
+        else:
+            run_label = sanitize_name(
+                args.run_name or f"pure_fasta_{fasta_for_structure.stem}"
+            )
+            output_dir = data_root / "results" / run_label
+
+        if not output_dir.is_absolute():
+            raise ValueError("--output-dir must be an absolute path in pure-FASTA mode")
+
+        # Preserve the resolved output directory for the later legacy path if
+        # structure prediction succeeds and the normal pipeline continues.
+        args.output_dir = str(output_dir)
+
+        receptor = _resolve_receptor_from_pure_fasta(
+            fasta_path=fasta_for_structure,
+            output_dir=output_dir,
+            structure_predictor_bin=args.structure_predictor_bin,
+            structure_predictor_extra_args=args.structure_predictor_extra_arg,
+            skip_structure_prediction=args.skip_structure_prediction,
+        )
+
+        if receptor is None:
+            return 0
 
     automatic_reference_options = (
         args.reference_uniprot_accession,
